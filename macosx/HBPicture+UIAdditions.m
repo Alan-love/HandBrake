@@ -152,13 +152,13 @@ static NSString * FormattedDisplayAspect(double disp_width, double disp_height)
                 (@"Source: %dx%d, ", @"HBPicture -> short info"),
                 self.sourceWidth, self.sourceHeight];
 
-    if (self.anamorphicMode == HBPictureAnarmophicModeAuto)
+    if (self.anamorphicMode == HBPictureAnarmophicModeAuto && self.parNum != 1 && self.parDen != 1)
     {
         sizeInfo = [NSString stringWithFormat:HBKitLocalizedString
                     (@"%@Output: %dx%d, Anamorphic: %dx%d Automatic", @"HBPicture -> short info"),
                     sizeInfo, self.storageWidth, self.storageHeight, self.displayWidth, self.displayHeight];
     }
-    else if (self.anamorphicMode == HBPictureAnarmophicModeCustom)
+    else if (self.anamorphicMode == HBPictureAnarmophicModeCustom && self.parNum != 1 && self.parDen != 1)
     {
         sizeInfo = [NSString stringWithFormat:HBKitLocalizedString
                     (@"%@Output: %dx%d, Anamorphic: %dx%d Custom", @"HBPicture -> short info"),
@@ -176,15 +176,22 @@ static NSString * FormattedDisplayAspect(double disp_width, double disp_height)
 
 - (NSString *)shortInfo
 {
-    return [NSString stringWithFormat:HBKitLocalizedString(@"%dx%d Storage, %dx%d Display", @"HBPicture -> short info"),
-            self.storageWidth, self.storageHeight, self.displayWidth, self.height];
+    if (self.parNum != 1 && self.parDen != 1)
+    {
+        return [NSString stringWithFormat:HBKitLocalizedString(@"%dx%d Storage, %dx%d Display", @"HBPicture -> short info"),
+                self.storageWidth, self.storageHeight, self.displayWidth, self.height];
+    }
+    else
+    {
+        return [NSString stringWithFormat:HBKitLocalizedString(@"%dx%d", @"HBPicture -> short non anamorphic info"), self.storageWidth, self.storageHeight];
+    }
 }
 
 - (NSString *)summary
 {
     NSMutableString *summary = [NSMutableString stringWithString:@""];
     [summary appendString:self.info];
-    if (self.cropMode != HBPictureCropModeNone && (self.cropTop && self.cropBottom && self.cropLeft && self.cropRight))
+    if (self.cropMode != HBPictureCropModeNone && (self.cropTop || self.cropBottom || self.cropLeft || self.cropRight))
     {
         [summary appendFormat:HBKitLocalizedString(@", Crop: %@ %d/%d/%d/%d", @"HBPicture -> summary"),
          self.cropMode ? HBKitLocalizedString(@"Automatic", @"HBPicture -> summary") : HBKitLocalizedString(@"Custom", @"HBPicture -> summary"),

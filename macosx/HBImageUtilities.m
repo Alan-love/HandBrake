@@ -40,7 +40,7 @@ CGImageRef CreateScaledCGImageFromCGImage(CGImageRef image, CGFloat thumbnailHei
     // specified here by CGBitmapContextCreate.
     CGColorSpaceRef colorspace = CGImageGetColorSpace(image);
     context = CGBitmapContextCreate (bitmapData,width,height,8,bitmapBytesPerRow,
-                                     colorspace,kCGImageAlphaNoneSkipFirst);
+                                     colorspace, (CGBitmapInfo)kCGImageAlphaNoneSkipFirst);
 
     if (context == NULL)
     {
@@ -78,7 +78,7 @@ CGImageRef CGImageRotated(CGImageRef imgRef, CGFloat angle, BOOL flipped) CF_RET
                                                    8,
                                                    0,
                                                    colorSpace,
-                                                   kCGImageAlphaPremultipliedFirst);
+                                                   (CGBitmapInfo)kCGImageAlphaPremultipliedFirst);
     CGContextSetAllowsAntialiasing(bmContext, FALSE);
     CGContextSetInterpolationQuality(bmContext, kCGInterpolationNone);
 
@@ -163,28 +163,26 @@ CGColorSpaceRef copyColorSpace(int primaries, int transfer, int matrix)
             break;
             }
 
+        case HB_COLR_TRA_IEC61966_2_1:
+            transferValue = kCVImageBufferTransferFunction_sRGB;
+            break;
+
         case HB_COLR_TRA_BT2020_10:
         case HB_COLR_TRA_BT2020_12:
             transferValue = kCVImageBufferTransferFunction_ITU_R_2020;
             break;
 
         case HB_COLR_TRA_SMPTEST2084:
-            if (@available(macOS 10.13, *)) {
             transferValue = kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ;
             break;
-            }
 
         case HB_COLR_TRA_ARIB_STD_B67:
-            if (@available(macOS 10.13, *)) {
             transferValue = kCVImageBufferTransferFunction_ITU_R_2100_HLG;
             break;
-            }
 
         case HB_COLR_TRA_SMPTE428:
-            if (@available(macOS 10.12, *)) {
             transferValue = kCVImageBufferTransferFunction_SMPTE_ST_428_1;
             break;
-            }
 
         case HB_COLR_TRA_BT709:
         default:

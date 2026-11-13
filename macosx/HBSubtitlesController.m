@@ -6,14 +6,15 @@
 
 #import "HBSubtitlesController.h"
 #import "HBSubtitlesDefaultsController.h"
-#import "HBTrackTitleViewController.h"
+#import "HBSubsTrackAdditionalViewController.h"
 
 @import HandBrakeKit;
 
-@interface HBSubtitlesController ()
+@interface HBSubtitlesController () <HBSubtitlesDefaultsControllerDelegate>
 
-@property (nonatomic, readwrite, strong) HBSubtitlesDefaultsController *defaultsController;
 @property (nonatomic, weak) IBOutlet NSTableView *table;
+@property (nonatomic, strong) NSArray<HBSecurityAccessToken *> *fileTokens;
+@property (nonatomic, strong) HBSubtitlesDefaultsController *defaultsController;
 
 @end
 
@@ -23,6 +24,12 @@
 {
     self = [super initWithNibName:@"Subtitles" bundle:nil];
     return self;
+}
+
+- (void)setSubtitles:(HBSubtitles *)subtitles
+{
+    _subtitles = subtitles;
+    self.fileTokens = nil;
 }
 
 #pragma mark - Actions
@@ -59,30 +66,55 @@
 
 - (IBAction)showSettingsSheet:(id)sender
 {
-    HBSubtitlesDefaults *defaults = [self.subtitles.defaults copy];
-    self.defaultsController = [[HBSubtitlesDefaultsController alloc] initWithSettings:defaults];
+    self.defaultsController = [[HBSubtitlesDefaultsController alloc] initWithSettings:[self.subtitles.defaults copy] delegate:self];
+    [self presentViewControllerAsSheet:self.defaultsController];
+}
 
-    [self.view.window beginSheet:self.defaultsController.window completionHandler:^(NSModalResponse returnCode) {
-        if (returnCode == NSModalResponseOK)
-        {
-            self.subtitles.defaults = defaults;
-        }
-        self.defaultsController = nil;
-    }];
+- (void)subtitlesControllerDidEnd:(nonnull HBSubtitlesDefaults *)settings returnCode:(NSModalResponse)returnCode
+{
+    if (returnCode == NSModalResponseOK)
+    {
+        self.subtitles.defaults = settings;
+    }
+    [self dismissViewController:self.defaultsController];
+    self.defaultsController = nil;
 }
 
 - (IBAction)showAdditionalSettingsPopOver:(id)sender
 {
-    HBTrackTitleViewController *controller = [[HBTrackTitleViewController alloc] init];
+    HBSubsTrackAdditionalViewController *controller = [[HBSubsTrackAdditionalViewController alloc] init];
     NSInteger index = [self.table rowForView:sender];
     if (index != -1)
     {
         controller.track = [self.subtitles objectInTracksAtIndex:index];
-        [self presentViewController:controller asPopoverRelativeToRect:[sender bounds] ofView:sender preferredEdge:NSRectEdgeMinX behavior:NSPopoverBehaviorTransient];
+        [self presentViewController:controller
+            asPopoverRelativeToRect:[sender bounds]
+                             ofView:sender
+                      preferredEdge:NSRectEdgeMaxY
+                           behavior:NSPopoverBehaviorSemitransient];
     }
 }
 
 #pragma mark - External subtitles import
+
+- (void)addTracksFromExternalFiles:(NSArray<NSURL *> *)fileURLs
+{
+    NSMutableArray<HBSecurityAccessToken *> *tokens = [[NSMutableArray alloc] init];
+
+    if (self.fileTokens)
+    {
+        [tokens addObjectsFromArray:self.fileTokens];
+    }
+
+    for (NSURL *importFileURL in fileURLs)
+    {
+        [tokens addObject:[HBSecurityAccessToken tokenWithAlreadyAccessedObject:importFileURL]];
+        [NSUserDefaults.standardUserDefaults setURL:importFileURL.URLByDeletingLastPathComponent forKey:@"LastExternalSubImportDirectoryURL"];
+        [self.subtitles addExternalSourceTrackFromURL:importFileURL addImmediately:YES];
+    }
+
+    self.fileTokens = tokens;
+}
 
 /**
  *  Imports a srt/ssa file.
@@ -92,14 +124,14 @@
 - (IBAction)browseImportExternalFile:(id)sender
 {
     NSOpenPanel *panel = [NSOpenPanel openPanel];
-    panel.allowsMultipleSelection = NO;
+    panel.allowsMultipleSelection = YES;
     panel.canChooseFiles = YES;
     panel.canChooseDirectories = NO;
 
     NSURL *sourceDirectory;
-    if ([[NSUserDefaults standardUserDefaults] URLForKey:@"LastExternalSubImportDirectoryURL"])
+    if ([NSUserDefaults.standardUserDefaults URLForKey:@"LastExternalSubImportDirectoryURL"])
     {
-        sourceDirectory = [[NSUserDefaults standardUserDefaults] URLForKey:@"LastExternalSubImportDirectoryURL"];
+        sourceDirectory = [NSUserDefaults.standardUserDefaults URLForKey:@"LastExternalSubImportDirectoryURL"];
     }
     else
     {
@@ -107,17 +139,13 @@
     }
 
     panel.directoryURL = sourceDirectory;
-    panel.allowedFileTypes = @[@"srt", @"ssa", @"ass"];
+    panel.allowedFileTypes = HBUtilities.supportedExtensions;
 
     [panel beginSheetModalForWindow:self.view.window completionHandler:^(NSInteger result)
     {
         if (result == NSModalResponseOK)
         {
-            NSURL *importFileURL = panel.URL;
-            NSURL *importDirectory = importFileURL.URLByDeletingLastPathComponent;
-            [[NSUserDefaults standardUserDefaults] setURL:importDirectory forKey:@"LastExternalSubImportDirectoryURL"];
-
-            [self.subtitles addExternalTrackFromURL:importFileURL];
+            [self addTracksFromExternalFiles:panel.URLs];
         }
     }];
 }

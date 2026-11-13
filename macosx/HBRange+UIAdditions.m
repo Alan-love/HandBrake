@@ -10,7 +10,7 @@
 
 @implementation HBRange (UIAdditions)
 
-- (NSArray *)chapters
+- (NSArray<NSString *> *)chapters
 {
     NSMutableArray *chapters = [NSMutableArray array];
     [self.title.chapters enumerateObjectsUsingBlock:^(id obj, NSUInteger idx, BOOL *stop) {
@@ -19,7 +19,7 @@
     return chapters;
 }
 
-- (NSArray *)types
+- (NSArray<NSString *> *)types
 {
     return @[HBKitLocalizedString(@"Chapters", @"HBRange -> display name"),
              HBKitLocalizedString(@"Seconds", @"HBRange -> display name"),
@@ -115,23 +115,29 @@
     const char *time = [value UTF8String];
     if (time)
     {
-        unsigned hour, minute, second, timeval;
+        unsigned hour = 0, minute = 0, second = 0;
 
-        if (sscanf(time, "%2u:%u:%u", &hour, &minute, &second) < 3) {
-            if (sscanf(time, "%u:%u:%u", &hour, &minute, &second) < 3) {
-                return 0;
+        if (sscanf(time, "%2u:%u:%u", &hour, &minute, &second) < 3)
+        {
+            if (sscanf(time, "%u:%u:%u", &hour, &minute, &second) < 3)
+            {
+                hour = 0;
+                if (sscanf(time, "%u:%u", &minute, &second) < 2)
+                {
+                    minute = 0;
+                    if (sscanf(time, "%u", &second) < 1)
+                    {
+                        return value;
+                    }
+                }
             }
         }
 
-        if (second > 60) {
-            second = 0;
-        }
-
-        timeval = hour * 60 * 60 + minute * 60 + second;
+        unsigned timeval = hour * 60 * 60 + minute * 60 + second;
 
         return @(timeval);
     }
-    return @"00:00:00";
+    return value;
 }
 
 @end

@@ -296,6 +296,7 @@
             {
                 [self presentError:error];
             }
+            [panel.URL stopAccessingSecurityScopedResource];
         }
     }];
 }
@@ -307,7 +308,7 @@
     NSSavePanel *panel = [NSSavePanel savePanel];
     panel.allowedFileTypes = @[@"csv"];
     panel.directoryURL = destinationDirectory;
-    panel.nameFieldStringValue = self.job.outputFileName.stringByDeletingPathExtension;
+    panel.nameFieldStringValue = self.job.destinationFileName.stringByDeletingPathExtension;
 
     [panel beginSheetModalForWindow:self.view.window completionHandler:^(NSInteger result)
     {
@@ -350,6 +351,8 @@
                 [panel close];
                 [[NSAlert alertWithError:saveError] runModal];
             }
+
+            [panel.URL stopAccessingSecurityScopedResource];
         }
     }];
 }

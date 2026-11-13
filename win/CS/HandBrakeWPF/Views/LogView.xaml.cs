@@ -11,90 +11,106 @@ namespace HandBrakeWPF.Views
 {
     using System;
     using System.Diagnostics;
-    using System.Threading.Tasks;
     using System.Windows;
     using System.Windows.Controls;
+    using System.Windows.Input;
 
-    using Caliburn.Micro;
+    using HandBrake.App.Core.Utilities;
 
+    using HandBrakeWPF.Commands;
+    using HandBrakeWPF.Helpers;
     using HandBrakeWPF.Services.Logging.EventArgs;
-    using HandBrakeWPF.Utilities;
     using HandBrakeWPF.ViewModels;
 
-    /// <summary>
-    /// Interaction logic for LogView.xaml
-    /// </summary>
     public partial class LogView : Window
     {
         private DelayedActionProcessor delayProcessor = new DelayedActionProcessor();
+        private DelayedActionProcessor searchDelayProcessor = new DelayedActionProcessor();
+        private LogViewModel viewModel;
         
-        /// <summary>
-        /// Initializes a new instance of the <see cref="LogView"/> class.
-        /// </summary>
         public LogView()
         {
             this.InitializeComponent();
             this.DataContextChanged += this.LogView_DataContextChanged;
+            this.Closed += this.LogView_Closed;
+            this.InputBindings.Add(new InputBinding(new CloseWindowCommand(this), new KeyGesture(Key.W, ModifierKeys.Control))); // Close Window
         }
 
-        /// <summary>
-        /// The log view_ data context changed.
-        /// </summary>
-        /// <param name="sender">
-        /// The sender.
-        /// </param>
-        /// <param name="e">
-        /// The e.
-        /// </param>
+        protected override void OnSourceInitialized(EventArgs e)
+        {
+            base.OnSourceInitialized(e);
+            WindowHelper.SetDarkMode(this);
+        }
+
+        private void LogView_Closed(object sender, EventArgs e)
+        {
+            ((LogViewModel)this.DataContext).LogMessageReceived -= this.Vm_LogMessageReceived;
+            ((LogViewModel)this.DataContext).LogResetEvent -= this.Vm_LogResetEvent;
+        }
+
         private void LogView_DataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
         {
             LogViewModel vm = e.NewValue as LogViewModel;
             if (vm != null)
             {
-                this.logText.AppendText(vm.ActivityLog);
+                viewModel = vm;
+                this.logText.AppendText(vm.GetFilteredLog());
                 vm.LogMessageReceived += this.Vm_LogMessageReceived;
+                vm.LogResetEvent += this.Vm_LogResetEvent;
             }
         }
 
-        /// <summary>
-        /// The vm_ log message received.
-        /// </summary>
-        /// <param name="sender">
-        /// The sender.
-        /// </param>
-        /// <param name="e">
-        /// The e.
-        /// </param>
+        private void Vm_LogResetEvent(object sender, EventArgs e)
+        {
+            ThreadHelper.OnUIThread(
+                () =>
+                {
+                    this.logText.Clear();
+                    this.logText.AppendText(this.viewModel.GetFilteredLog());
+                });
+        }
+
+        private void SearchBox_TextChanged(object sender, TextChangedEventArgs e)
+        {
+            if (this.viewModel == null)
+            {
+                return;
+            }
+
+            this.searchDelayProcessor.PerformTask(() => ThreadHelper.OnUIThread(this.RefreshLog), 250);
+        }
+
+        private void RefreshLog()
+        {
+            this.logText.Clear();
+            this.logText.AppendText(this.viewModel.GetFilteredLog());
+            if (this.AutoScroll.IsChecked)
+            {
+                this.logText.ScrollToEnd();
+            }
+        }
+
+        private void ClearSearch_Click(object sender, RoutedEventArgs e)
+        {
+            this.searchBox.Clear();
+            this.searchBox.Focus();
+        }
+
         private void Vm_LogMessageReceived(object sender, LogEventArgs e)
         {
             try
-            {
-                if (e == null)
+            { 
+                if (!this.viewModel.MatchesFilter(e.Log.Content))
                 {
-                    Caliburn.Micro.Execute.OnUIThread(
-                        () =>
-                            {
-                                LogViewModel vm = this.DataContext as LogViewModel;
-                                if (vm != null)
-                                {
-                                    this.logText.Clear();
-                                    this.logText.AppendText(vm.ActivityLog);
-                                }
-                                else
-                                {
-                                    Debug.WriteLine("Failed to Reset Log correctly.");
-                                }
-                            });   
+                    return;
                 }
-                else
-                {
-                    // This works better than Data Binding because of the scroll.
-                    this.logText.AppendText(Environment.NewLine + e.Log.Content);
 
-                    if (this.AutoScroll.IsChecked)
-                    {
-                        delayProcessor.PerformTask(() => Execute.BeginOnUIThread(() => this.logText.ScrollToEnd()), 100);
-                    }
+                // This works better than Data Binding because of the scroll.
+                this.logText.AppendText(e.Log.Content + Environment.NewLine);
+
+                if (this.AutoScroll.IsChecked)
+                {
+                    delayProcessor.PerformTask(() => ThreadHelper.OnUIThread(() => this.logText.ScrollToEnd()), 100);
                 }
             }
             catch (Exception exc)
@@ -103,15 +119,6 @@ namespace HandBrakeWPF.Views
             }
         }
 
-        /// <summary>
-        /// Hide the Toolbar Endplate.
-        /// </summary>
-        /// <param name="sender">
-        /// The sender.
-        /// </param>
-        /// <param name="e">
-        /// The e.
-        /// </param>
         private void ToolBarLoaded(object sender, RoutedEventArgs e)
         {
             ToolBar toolBar = sender as ToolBar;
@@ -122,6 +129,25 @@ namespace HandBrakeWPF.Views
                 {
                     overflowGrid.Visibility = Visibility.Collapsed;
                 }
+            }
+        }
+
+        private void LogView_OnPreviewKeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.Key == Key.Escape)
+            {
+                this.Close();
+            }
+        }
+
+        private void logViewOptions_OnClick(object sender, RoutedEventArgs e)
+        {
+            var button = sender as FrameworkElement;
+            if (button != null && button.ContextMenu != null)
+            {
+                button.ContextMenu.PlacementTarget = button;
+                button.ContextMenu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
+                button.ContextMenu.IsOpen = true;
             }
         }
     }

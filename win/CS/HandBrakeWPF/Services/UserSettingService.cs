@@ -15,17 +15,19 @@ namespace HandBrakeWPF.Services
     using System.Linq;
     using System.Text.Json;
 
+    using HandBrake.App.Core.Utilities;
     using HandBrake.Interop.Interop;
     using HandBrake.Interop.Utilities;
 
     using HandBrakeWPF.Model;
+    using HandBrakeWPF.Model.Options;
     using HandBrakeWPF.Model.Video;
     using HandBrakeWPF.Properties;
     using HandBrakeWPF.Services.Interfaces;
     using HandBrakeWPF.Services.Logging.Interfaces;
     using HandBrakeWPF.Utilities;
 
-    using GeneralApplicationException = Exceptions.GeneralApplicationException;
+    using GeneralApplicationException = HandBrake.App.Core.Exceptions.GeneralApplicationException;
     using SettingChangedEventArgs = EventArgs.SettingChangedEventArgs;
     using SystemInfo = Utilities.SystemInfo;
 
@@ -244,15 +246,21 @@ namespace HandBrakeWPF.Services
             // Legacy Settings forced Reset.
             this.userSettings[UserSettingConstants.ScalingMode] = VideoScaler.Lanczos;
 
-            if (!SystemInfo.IsWindows10() || SystemInfo.GetCpuCoreCount < 4)
+            if (SystemInfo.MaximumSimultaneousInstancesSupported < 2)
             {
                 this.userSettings[UserSettingConstants.ProcessIsolationEnabled] = false;
                 this.userSettings[UserSettingConstants.SimultaneousEncodes] = 1;
             }
 
-            if (!SystemInfo.IsWindows10())
+            // Handle change of language code zh to zh-CN
+            object language;
+            if (this.userSettings.TryGetValue(UserSettingConstants.UiLanguage, out language))
             {
-                this.userSettings[UserSettingConstants.DarkThemeMode] = DarkThemeMode.Light;
+                if (language is string and "zh")
+                {
+                    // Reset to use system language if we have the old zh stored in settings.
+                    this.userSettings[UserSettingConstants.UiLanguage] = InterfaceLanguageUtilities.UseSystemLanguage;
+                }
             }
         }
         
@@ -272,7 +280,8 @@ namespace HandBrakeWPF.Services
             defaults.Add(UserSettingConstants.UpdateStatus, false);
             defaults.Add(UserSettingConstants.LastUpdateCheckDate, DateTime.Now.Date.AddDays(-30));
             defaults.Add(UserSettingConstants.DaysBetweenUpdateCheck, 1);
-            defaults.Add(UserSettingConstants.DarkThemeMode, DarkThemeMode.Light);
+            defaults.Add(UserSettingConstants.DarkThemeMode, AppThemeMode.System);
+            defaults.Add(UserSettingConstants.ThemeImageType, ThemeImageType.Theme);
             defaults.Add(UserSettingConstants.ShowPreviewOnSummaryTab, true);
             defaults.Add(UserSettingConstants.MainWindowMinimize, false);
             defaults.Add(UserSettingConstants.ClearCompletedFromQueue, false);
@@ -280,15 +289,19 @@ namespace HandBrakeWPF.Services
             defaults.Add(UserSettingConstants.ShowAddAllToQueue, false);
             defaults.Add(UserSettingConstants.ShowAddSelectionToQueue, false);
             defaults.Add(UserSettingConstants.MediaPlayerPath, @"C:\Program Files\VideoLAN\vlc\vlc.exe");
-
+            defaults.Add(UserSettingConstants.PresetMenuDisplayMode, 0);
+            defaults.Add(UserSettingConstants.RightToLeftUi, 0); 
+            defaults.Add(UserSettingConstants.PresetUiType, 1);
+            
             // Output Files
             defaults.Add(UserSettingConstants.AutoNaming, true);
             defaults.Add(UserSettingConstants.AutoNamePath, string.Empty);
-            defaults.Add(UserSettingConstants.AutoNameFormat, "{source}-{title}");
+            defaults.Add(UserSettingConstants.AutoNameFormat, "{source}");
             defaults.Add(UserSettingConstants.AutonameFilePrePostString, "output_");
             defaults.Add(UserSettingConstants.AutoNameTitleCase, true);
             defaults.Add(UserSettingConstants.AutoNameRemoveUnderscore, true);
             defaults.Add(UserSettingConstants.AutonameFileCollisionBehaviour, 0);
+            defaults.Add(UserSettingConstants.UseIsoDateFormat, false);
             defaults.Add(UserSettingConstants.AlwaysUseDefaultPath, true);
             defaults.Add(UserSettingConstants.RemovePunctuation, false);
             defaults.Add(UserSettingConstants.FileOverwriteBehaviour, 0);
@@ -303,13 +316,20 @@ namespace HandBrakeWPF.Services
             defaults.Add(UserSettingConstants.WhenDoneAudioFile, string.Empty);
 
             // Video
-            defaults.Add(UserSettingConstants.EnableQuickSyncEncoding, true);
-            defaults.Add(UserSettingConstants.EnableQuickSyncDecoding, true);
+            bool intelDefaultSetting = HandBrakeHardwareEncoderHelper.IsQsvAvailable;
+
+            // Note: These are set to false at the moment due to user complaints. Until we deem them more stable, this feature will be opt-in. Users can enable them in the settings if they wish to use them.
+            bool nvidiaDefaultSetting = false; // HandBrakeHardwareEncoderHelper.IsNVEncH264Available;
+            bool amfDefaultSetting = false; //  HandBrakeHardwareEncoderHelper.IsAMFDecAvailable;
+
+            defaults.Add(UserSettingConstants.EnableQuickSyncDecoding, intelDefaultSetting);
+            defaults.Add(UserSettingConstants.EnableQuickSyncHyperEncode, false);
             defaults.Add(UserSettingConstants.UseQSVDecodeForNonQSVEnc, false);
-            defaults.Add(UserSettingConstants.EnableVceEncoder, true);
-            defaults.Add(UserSettingConstants.EnableNvencEncoder, true);
+            defaults.Add(UserSettingConstants.EnableNvDecSupport, nvidiaDefaultSetting);
+            defaults.Add(UserSettingConstants.EnableAmfDecSupport, amfDefaultSetting);
             defaults.Add(UserSettingConstants.EnableQuickSyncLowPower, true);
-            
+            defaults.Add(UserSettingConstants.EnableDirectXDecoding, SystemInfo.IsArmDevice);
+
             // Advanced
             defaults.Add(UserSettingConstants.PreventSleep, true);
             defaults.Add(UserSettingConstants.PauseEncodingOnLowBattery, true);
@@ -320,18 +340,24 @@ namespace HandBrakeWPF.Services
             defaults.Add(UserSettingConstants.PauseQueueOnLowDiskspaceLevel, 2000000000L);
             defaults.Add(UserSettingConstants.PreviewScanCount, 10);
             defaults.Add(UserSettingConstants.MinScanDuration, 10);
-            defaults.Add(UserSettingConstants.ProcessPriorityInt, 3);
+            defaults.Add(UserSettingConstants.MaxScanDuration, 0);
+            defaults.Add(UserSettingConstants.KeepDuplicateTitles, false);
+            defaults.Add(UserSettingConstants.ProcessPriorityInt, 2);
             defaults.Add(UserSettingConstants.X264Step, 0.5);
             defaults.Add(UserSettingConstants.SaveLogToCopyDirectory, false);
             defaults.Add(UserSettingConstants.SaveLogWithVideo, false);
             defaults.Add(UserSettingConstants.ClearOldLogs, true);
 
+            defaults.Add(UserSettingConstants.ExcludedExtensions, new List<string> { "png", "jpg", "srt", "ass", "ssa", "txt" });
+            defaults.Add(UserSettingConstants.RecursiveFolderScan, false);
+            defaults.Add(UserSettingConstants.DefaultRangeMode, DefaultRangeMode.Chapters);
+            
             // Preview
             defaults.Add(UserSettingConstants.LastPreviewDuration, 30);
-            defaults.Add(UserSettingConstants.DefaultPlayer, false);
+            defaults.Add(UserSettingConstants.UseExternalPlayer, false);
 
             // Experimental
-            defaults.Add(UserSettingConstants.ProcessIsolationEnabled, SystemInfo.IsWindows10());
+            defaults.Add(UserSettingConstants.ProcessIsolationEnabled, true);
             defaults.Add(UserSettingConstants.ProcessIsolationPort, 8037);
             defaults.Add(UserSettingConstants.SimultaneousEncodes, 1);
 
@@ -341,6 +367,12 @@ namespace HandBrakeWPF.Services
             defaults.Add(UserSettingConstants.PreviewShowPictureSettingsOverlay, false);
             defaults.Add(UserSettingConstants.RunCounter, 0);
             defaults.Add(UserSettingConstants.ForceSoftwareRendering, false);
+            defaults.Add(UserSettingConstants.IsUpdateAvailableBuild, 0);
+            defaults.Add(UserSettingConstants.ExtendedQueueDisplay, true);
+            defaults.Add(UserSettingConstants.HardwareDetectTimeoutSeconds, 12);
+            defaults.Add(UserSettingConstants.SimpleQueueView, false);
+            defaults.Add(UserSettingConstants.ShowPresetDesc, true);
+            defaults.Add(UserSettingConstants.IsLegacyMenuShown, true);
 
             return defaults;
         }

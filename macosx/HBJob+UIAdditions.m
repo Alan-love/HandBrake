@@ -16,15 +16,17 @@
 #import "HBSubtitlesTrack.h"
 
 #import "HBPicture+UIAdditions.h"
-#import "HBFilters+UIAdditions.h"
+#import "HBFilter+UIAdditions.h"
 
 #import "HBAudioTransformers.h"
 #import "HBLocalizationUtilities.h"
 
 #import "HBRange.h"
-#import "HBVideo.h"
+#import "HBVideo+UIAdditions.h"
 #import "HBPicture.h"
-#import "HBFilters.h"
+#import "HBVideoFilters.h"
+#import "HBAudioFilters.h"
+#import "HBFilter.h"
 #import "HBAudio.h"
 #import "HBSubtitles.h"
 
@@ -40,7 +42,7 @@ static HBMixdownTransformer    *mixdownTransformer;
 
 - (BOOL)mp4OptionsEnabled
 {
-    return ((self.container & HB_MUX_MASK_MP4) != 0);
+    return ((self.container & HB_MUX_MASK_MP4 || self.container & HB_MUX_MASK_MOV) != 0);
 }
 
 + (NSSet<NSString *> *)keyPathsForValuesAffectingMp4OptionsEnabled
@@ -81,6 +83,10 @@ static HBMixdownTransformer    *mixdownTransformer;
         {
             title = @"MP4";
         }
+        else if (container->format & HB_MUX_MASK_MOV)
+        {
+            title = @"MOV";
+        }
         else if (container->format & HB_MUX_MASK_MKV)
         {
             title = @"MKV";
@@ -105,12 +111,21 @@ static HBMixdownTransformer    *mixdownTransformer;
 {
     if (!detailAttr)
     {
+        
+        CGFloat indent = 100;
+        NSBundle *bundle = [NSBundle bundleForClass:[HBJob class]];
+        NSString *currentLocalization = bundle.preferredLocalizations.firstObject;
+        if ([currentLocalization hasPrefix:@"de"])
+        {
+            indent = 120;
+        }
+        
         // Attributes
         NSMutableParagraphStyle *ps = [NSParagraphStyle.defaultParagraphStyle mutableCopy];
-        ps.headIndent = 88.0;
+        ps.headIndent = indent;
         ps.paragraphSpacing = 1.0;
-        ps.tabStops = @[[[NSTextTab alloc] initWithType:NSRightTabStopType location:88],
-                        [[NSTextTab alloc] initWithType:NSLeftTabStopType location:90]];
+        ps.tabStops = @[[[NSTextTab alloc] initWithType:NSRightTabStopType location:indent - 2],
+                        [[NSTextTab alloc] initWithType:NSLeftTabStopType location:indent]];
 
         detailAttr = @{NSFontAttributeName: [NSFont systemFontOfSize:NSFont.smallSystemFontSize],
                        NSParagraphStyleAttributeName: ps,
@@ -157,15 +172,15 @@ static HBMixdownTransformer    *mixdownTransformer;
     {
         [passesString appendString:HBKitLocalizedString(@"1 Foreign Language Search Pass - ", @"Title description")];
     }
-    if (self.video.qualityType != 1 && self.video.twoPass == YES)
+    if (self.video.multiPassSupported && self.video.multiPass == YES)
     {
-        if (self.video.turboTwoPass == YES)
+        if (self.video.turboMultiPass == YES)
         {
-            [passesString appendString:HBKitLocalizedString(@"2 Video Passes First Turbo", @"Title description")];
+            [passesString appendString:HBKitLocalizedString(@"Multi Passes Turbo", @"Title description")];
         }
         else
         {
-            [passesString appendString:HBKitLocalizedString(@"2 Video Passes", @"Title description")];
+            [passesString appendString:HBKitLocalizedString(@"Multi Passes", @"Title description")];
         }
     }
 
@@ -212,14 +227,38 @@ static HBMixdownTransformer    *mixdownTransformer;
     NSMutableAttributedString *attrString = [[NSMutableAttributedString alloc] init];
     NSMutableString *options = [NSMutableString string];
 
-    [options appendString:@(hb_container_get_name(self.container))];
+    NSString *containerName;
+
+    if (self.container & HB_MUX_MASK_MP4)
+    {
+        containerName = @"MP4";
+    }
+    else if (self.container & HB_MUX_MASK_MOV)
+    {
+        containerName = @"MOV";
+    }
+    else if (self.container & HB_MUX_MASK_MKV)
+    {
+        containerName = @"MKV";
+    }
+    else if (self.container & HB_MUX_MASK_WEBM)
+    {
+        containerName = @"WebM";
+    }
+    else
+    {
+        containerName = @(hb_container_get_name(self.container));
+    }
+
+    [options appendString:containerName];
+
 
     if (self.chaptersEnabled)
     {
         [options appendString:HBKitLocalizedString(@", Chapter Markers", @"Format description")];
     }
 
-    if ((self.container & HB_MUX_MASK_MP4) && self.mp4HttpOptimize)
+    if ((self.container & HB_MUX_MASK_MP4) && self.optimize)
     {
         [options appendString:HBKitLocalizedString(@", Web Optimized", @"Format description")];
     }
@@ -268,7 +307,7 @@ static HBMixdownTransformer    *mixdownTransformer;
     [attrString appendString:@"\t"                          withAttributes:detailAttr];
     [attrString appendString:HBKitLocalizedString(@"Destination:", @"Destination description") withAttributes:detailBoldAttr];
     [attrString appendString:@" \t"                         withAttributes:detailAttr];
-    [attrString appendString:self.completeOutputURL.path    withAttributes:detailAttr];
+    [attrString appendString:self.destinationURL.path    withAttributes:detailAttr];
     [attrString appendString:@"\n"                          withAttributes:detailAttr];
 
     return attrString;
@@ -293,136 +332,27 @@ static HBMixdownTransformer    *mixdownTransformer;
     NSMutableAttributedString *attrString = [[NSMutableAttributedString alloc] init];
 
     NSMutableString *summary = [NSMutableString string];
-    HBFilters *filters = self.filters;
 
-    // Detelecine
-    if (![filters.detelecine isEqualToString:@"off"])
+    for (HBFilter *filter in self.filters.filters)
     {
-        if ([filters.detelecine isEqualToString:@"custom"])
+        if ([filter.preset isEqualToString:@"custom"])
         {
-            [summary appendFormat:@", %@ (%@)", HBKitLocalizedString(@"Detelecine", @"Dimensions description"), filters.detelecineCustomString];
+            [summary appendFormat:@", %@ (%@)", filter.localizedName, filter.custom];
+        }
+        else if (filter.tune && [filter.tune isEqualToString:@"none"] == NO)
+        {
+            HBFilterPresetTransformer *pT = [[HBFilterPresetTransformer alloc] initWithWithFilterID:filter.filterID];
+            HBFilterTuneTransformer *tT = [[HBFilterTuneTransformer alloc] initWithWithFilterID:filter.filterID];
+            [summary appendFormat:@", %@ (%@, %@)", filter.localizedName,
+             [pT transformedValue:filter.preset],
+             [tT transformedValue:filter.tune]];
         }
         else
         {
-            [summary appendFormat:@", %@ (%@)", HBKitLocalizedString(@"Detelecine", @"Dimensions description"), [[[HBFilters detelecinePresetsDict] allKeysForObject:filters.detelecine] firstObject]];
+            HBFilterPresetTransformer *pT = [[HBFilterPresetTransformer alloc] initWithWithFilterID:filter.filterID];
+            [summary appendFormat:@", %@ (%@)", filter.localizedName,
+             [pT transformedValue:filter.preset]];
         }
-    }
-    else if (![filters.deinterlace isEqualToString:@"off"])
-    {
-        // Deinterlace or Decomb
-        NSString *type =  [[[HBFilters deinterlaceTypesDict] allKeysForObject:filters.deinterlace] firstObject];
-
-        if ([filters.deinterlacePreset isEqualToString:@"custom"])
-        {
-            [summary appendFormat:@", %@ (%@)", type, filters.deinterlaceCustomString];
-        }
-        else
-        {
-            if ([filters.deinterlace isEqualToString:@"decomb"])
-            {
-                [summary appendFormat:@", %@ (%@)", type, [[[HBFilters decombPresetsDict] allKeysForObject:filters.deinterlacePreset] firstObject]];
-            }
-            else if ([filters.deinterlace isEqualToString:@"deinterlace"])
-            {
-                [summary appendFormat:@", %@ (%@)", type, [[[HBFilters deinterlacePresetsDict] allKeysForObject:filters.deinterlacePreset] firstObject]];
-            }
-        }
-    }
-
-    // Deblock
-    if (![filters.deblock isEqualToString:@"off"])
-    {
-        [summary appendFormat:@", %@ (%@", HBKitLocalizedString(@"Deblock", @"Filters description"), [[[HBFilters deblockPresetDict] allKeysForObject:filters.deblock] firstObject]];
-        if (![filters.deblock isEqualToString:@"custom"])
-        {
-            [summary appendFormat:@", %@", [[[HBFilters deblockTunesDict] allKeysForObject:filters.deblockTune] firstObject]];
-        }
-        else
-        {
-            [summary appendFormat:@", %@", filters.deblockCustomString];
-        }
-
-        [summary appendString:@")"];
-    }
-
-    // Denoise
-    if (![filters.denoise isEqualToString:@"off"])
-    {
-        [summary appendFormat:@", %@ (%@", HBKitLocalizedString(@"Denoise", @"Filters description"), [[[HBFilters denoiseTypesDict] allKeysForObject:filters.denoise] firstObject]];
-        if (![filters.denoisePreset isEqualToString:@"custom"])
-        {
-            [summary appendFormat:@", %@", [[[HBFilters denoisePresetDict] allKeysForObject:filters.denoisePreset] firstObject]];
-
-            if ([filters.denoise isEqualToString:@"nlmeans"])
-            {
-                [summary appendFormat:@", %@", [[[HBFilters nlmeansTunesDict] allKeysForObject:filters.denoiseTune] firstObject]];
-            }
-        }
-        else
-        {
-            [summary appendFormat:@", %@", filters.denoiseCustomString];
-        }
-
-        [summary appendString:@")"];
-    }
-
-    // Chroma Smooth
-    if (![filters.chromaSmooth isEqualToString:@"off"])
-    {
-        [summary appendFormat:@", %@ (%@", HBKitLocalizedString(@"Chroma Smooth", @"Filters description"), [[[HBFilters chromaSmoothPresetDict] allKeysForObject:filters.chromaSmooth] firstObject]];
-        if (![filters.chromaSmooth isEqualToString:@"custom"])
-        {
-            [summary appendFormat:@", %@", [[[HBFilters chromaSmoothTunesDict] allKeysForObject:filters.chromaSmoothTune] firstObject]];
-        }
-        else
-        {
-            [summary appendFormat:@", %@", filters.chromaSmoothCustomString];
-        }
-
-        [summary appendString:@")"];
-    }
-
-    // Sharpen
-    if (![filters.sharpen isEqualToString:@"off"])
-    {
-        [summary appendFormat:@", %@ (%@", HBKitLocalizedString(@"Sharpen", @"Filters description"), [[[HBFilters sharpenTypesDict] allKeysForObject:filters.sharpen] firstObject]];
-        if (![filters.sharpenPreset isEqualToString:@"custom"])
-        {
-            [summary appendFormat:@", %@", [[[HBFilters sharpenPresetDict] allKeysForObject:filters.sharpenPreset] firstObject]];
-
-            if ([filters.sharpen isEqualToString:@"unsharp"])
-            {
-                [summary appendFormat:@", %@", [[[HBFilters sharpenTunesDict] allKeysForObject:filters.sharpenTune] firstObject]];
-            }
-            else if ([filters.sharpen isEqualToString:@"lapsharp"])
-            {
-                [summary appendFormat:@", %@", [[[HBFilters sharpenTunesDict] allKeysForObject:filters.sharpenTune] firstObject]];
-            }
-        }
-        else
-        {
-            [summary appendFormat:@", %@", filters.sharpenCustomString];
-        }
-
-        [summary appendString:@")"];
-    }
-
-    // Grayscale
-    if (filters.grayscale)
-    {
-        [summary appendFormat:@", %@", HBKitLocalizedString(@"Grayscale", @"Filters description")];
-    }
-
-    // Colorspace
-    if (![filters.colorspace isEqualToString:@"off"])
-    {
-        [summary appendFormat:@", %@ (%@", HBKitLocalizedString(@"Colorspace", @"Filters description"), [[[HBFilters colorspacePresetDict] allKeysForObject:filters.colorspace] firstObject]];
-        if ([filters.colorspace isEqualToString:@"custom"])
-        {
-            [summary appendFormat:@", %@", filters.colorspaceCustomString];
-        }
-
-        [summary appendString:@")"];
     }
 
     if ([summary hasPrefix:@", "])
@@ -449,21 +379,31 @@ static HBMixdownTransformer    *mixdownTransformer;
     NSMutableString *videoInfo = [NSMutableString string];
 
     const char *encoderName = hb_video_encoder_get_name(self.video.encoder);
-    [videoInfo appendFormat:HBKitLocalizedString(@"Encoder: %@, ", @"Video description"),
-                            encoderName ? @(encoderName) : HBKitLocalizedString(@"Unknown", @"Video description")];
+    [videoInfo appendString:encoderName ? @(encoderName) : HBKitLocalizedString(@"Unknown", @"Video description")];
 
-    [videoInfo appendString:HBKitLocalizedString(@"Framerate: ", @"Video description")];
+    if (self.video.qualityType == 0) // ABR
+    {
+        [videoInfo appendFormat:@", "];
+        [videoInfo appendFormat:HBKitLocalizedString(@"%d kbps", @"Video description"), self.video.avgBitrate];
+    }
+    else // CRF
+    {
+        [videoInfo appendFormat:@", "];
+        [videoInfo appendString:[NSString localizedStringWithFormat:HBKitLocalizedString(@"%.2f %s", @"Video description"), self.video.quality, hb_video_quality_get_name(self.video.encoder)]];
+    }
+
+    [videoInfo appendFormat:@", "];
 
     if (self.video.frameRate == 0)
     {
         if (self.video.frameRateMode == 0)
         {
             // we are using same as source with vfr
-            [videoInfo appendString:HBKitLocalizedString(@"Same as source (variable)", @"Video description")];
+            [videoInfo appendString:HBKitLocalizedString(@"Same as source framerate (variable)", @"Video description")];
         }
         else
         {
-            [videoInfo appendString:HBKitLocalizedString(@"Same as source (constant)", @"Video description")];
+            [videoInfo appendString:HBKitLocalizedString(@"Same as source framerate (constant)", @"Video description")];
         }
     }
     else
@@ -471,23 +411,12 @@ static HBMixdownTransformer    *mixdownTransformer;
         // we have a specified, constant framerate
         if (self.video.frameRateMode == 0)
         {
-            [videoInfo appendFormat:HBKitLocalizedString(@"Peak %@ (may be lower)", @"Video description"), @(hb_video_framerate_get_name(self.video.frameRate))];
+            [videoInfo appendFormat:HBKitLocalizedString(@"Peak framerate %@ (may be lower)", @"Video description"), @(hb_video_framerate_get_name(self.video.frameRate))];
         }
         else
         {
-            [videoInfo appendFormat:HBKitLocalizedString(@"Peak %@ (constant frame rate)", @"Video description"), @(hb_video_framerate_get_name(self.video.frameRate))];
+            [videoInfo appendFormat:HBKitLocalizedString(@"Peak framerate %@ (constant)", @"Video description"), @(hb_video_framerate_get_name(self.video.frameRate))];
         }
-    }
-
-    if (self.video.qualityType == 0) // ABR
-    {
-        [videoInfo appendFormat:@", "];
-        [videoInfo appendFormat:HBKitLocalizedString(@"Bitrate: %d kbps", @"Video description"), self.video.avgBitrate];
-    }
-    else // CRF
-    {
-        [videoInfo appendFormat:@", "];
-        [videoInfo appendString:[NSString localizedStringWithFormat:HBKitLocalizedString(@"Constant Quality: %.2f %s", @"Video description"), self.video.quality, hb_video_quality_get_name(self.video.encoder)]];
     }
 
     [attrString appendString:@"\t"       withAttributes:detailAttr];
@@ -533,7 +462,7 @@ static HBMixdownTransformer    *mixdownTransformer;
             [encoderPresetInfo appendFormat:HBKitLocalizedString(@"Level: %@", @"Video description"), self.video.level];
         }
 
-        [attrString appendString:@"\t"                  withAttributes:detailAttr];
+        [attrString appendString:@"\n\t"                withAttributes:detailAttr];
         [attrString appendString:HBKitLocalizedString(@"Video Options:", @"Video description") withAttributes:detailBoldAttr];
         [attrString appendString:@" \t"                 withAttributes:detailAttr];
         [attrString appendString:encoderPresetInfo      withAttributes:detailAttr];
@@ -575,31 +504,70 @@ static HBMixdownTransformer    *mixdownTransformer;
     {
         if (audioTrack.isEnabled)
         {
-            NSMutableString *detailString = [NSMutableString stringWithFormat:HBKitLocalizedString(@"%@ ▸ Encoder: %@", @"Audio description"),
-                                      self.audio.sourceTracks[audioTrack.sourceTrackIdx].displayName,
-                                      @(hb_audio_encoder_get_name(audioTrack.encoder))];
+            const char *encoder_name = hb_audio_encoder_get_name(audioTrack.encoder);
+            NSMutableString *detailString = [NSMutableString stringWithFormat:HBKitLocalizedString(@"%@ ▸ %@", @"Audio description"),
+                                             self.audio.sourceTracks[audioTrack.sourceTrackIdx].displayName,
+                                             encoder_name ? @(encoder_name) : HBKitLocalizedString(@"Unknown", @"HBJob -> video short description encoder name")];
 
             if ((audioTrack.encoder & HB_ACODEC_PASS_FLAG) == 0)
             {
                 NSString *mixdown = [mixdownTransformer transformedValue:@(audioTrack.mixdown)];
 
                 [detailString appendString:@", "];
-                [detailString appendFormat:HBKitLocalizedString(@"Mixdown: %@, Samplerate: %@, Bitrate: %d kbps", @"Audio description"),
+                [detailString appendFormat:HBKitLocalizedString(@"%@, %@", @"Audio description"),
                                             mixdown,
-                                            audioTrack.sampleRate ? [NSString stringWithFormat:@"%@ khz", @(hb_audio_samplerate_get_name(audioTrack.sampleRate))] : @"Auto",
-                                            audioTrack.bitRate];
+                                            audioTrack.sampleRate ? [NSString stringWithFormat:@"%@ khz", @(hb_audio_samplerate_get_name(audioTrack.sampleRate))] : @"Auto"];
+
+                if (audioTrack.mode == HBAudioEncoderModeABR)
+                {
+                    [detailString appendFormat:HBKitLocalizedString(@", %d kbps", @"Audio description"),
+                                                audioTrack.bitRate];
+                }
+                else
+                {
+                    [detailString appendFormat:HBKitLocalizedString(@", %@ CQ", @"Audio description"),
+                                                @(audioTrack.quality)];
+                }
 
                 if (0.0 < audioTrack.drc)
                 {
                     [detailString appendString:@", "];
-                    [detailString appendString:[NSString localizedStringWithFormat:HBKitLocalizedString(@"DRC: %.2f", @"Audio description"), audioTrack.drc]];
+                    [detailString appendString:[NSString localizedStringWithFormat:HBKitLocalizedString(@"DRC (%.2f)", @"Audio description"), audioTrack.drc]];
                 }
 
                 if (0.0 != audioTrack.gain)
                 {
                     [detailString appendString:@", "];
-                    [detailString appendString:[NSString localizedStringWithFormat:HBKitLocalizedString(@"Gain: %.2f", @"Audio description"), audioTrack.gain]];
+                    [detailString appendString:[NSString localizedStringWithFormat:HBKitLocalizedString(@"Gain (%.2f)", @"Audio description"), audioTrack.gain]];
                 }
+            }
+
+            for (HBFilter *filter in audioTrack.filters.filters)
+            {
+                if ([filter.preset isEqualToString:@"custom"])
+                {
+                    [detailString appendFormat:@", %@ (%@)", filter.localizedName, filter.custom];
+                }
+                else if (filter.tune && [filter.tune isEqualToString:@"none"] == NO)
+                {
+                    HBFilterPresetTransformer *pT = [[HBFilterPresetTransformer alloc] initWithWithFilterID:filter.filterID];
+                    HBFilterTuneTransformer *tT = [[HBFilterTuneTransformer alloc] initWithWithFilterID:filter.filterID];
+                    [detailString appendFormat:@", %@ (%@, %@)", filter.localizedName,
+                     [pT transformedValue:filter.preset],
+                     [tT transformedValue:filter.tune]];
+                }
+                else
+                {
+                    HBFilterPresetTransformer *pT = [[HBFilterPresetTransformer alloc] initWithWithFilterID:filter.filterID];
+                    [detailString appendFormat:@", %@ (%@)", filter.localizedName,
+                     [pT transformedValue:filter.preset]];
+                }
+            }
+
+            if (audioTrack.title.length)
+            {
+                [detailString appendString:@", "];
+                [detailString appendFormat:HBKitLocalizedString(@"Title: %@", @"Audio track title description"), audioTrack.title];
             }
 
             [attrString appendString:@"\t" withAttributes: detailAttr];
@@ -637,6 +605,12 @@ static HBMixdownTransformer    *mixdownTransformer;
 
             // remember that index 0 of Subtitles can contain "Foreign Audio Search
             [detailString appendString:self.subtitles.sourceTracks[track.sourceTrackIdx].displayName];
+
+            if (track.title.length)
+            {
+                [detailString appendString:@", "];
+                [detailString appendFormat:HBKitLocalizedString(@"Title: %@", @"Subtitles track title description"), track.title];
+            }
 
             if (track.forcedOnly)
             {
@@ -688,17 +662,16 @@ static HBMixdownTransformer    *mixdownTransformer;
         [attrString appendAttributedString:[self destinationAttributedDescription]];
         [attrString appendString:@"\n" withAttributes: shortHeightAttr];
 
-        [attrString appendAttributedString:[self formatAttributedDescription]];
+        [attrString appendAttributedString:[self rangeAttributedDescription]];
         [attrString appendString:@"\n" withAttributes: shortHeightAttr];
 
-        [attrString appendAttributedString:[self rangeAttributedDescription]];
+        [attrString appendAttributedString:[self formatAttributedDescription]];
         [attrString appendString:@"\n" withAttributes: shortHeightAttr];
 
         [attrString appendAttributedString:[self dimensionsAttributedDescription]];
         [attrString appendString:@"\n" withAttributes: shortHeightAttr];
 
-        NSAttributedString *filters = [self filtersAttributedDescription];
-        if (filters.length)
+        if (self.filters.filters.count)
         {
             [attrString appendAttributedString:[self filtersAttributedDescription]];
             [attrString appendString:@"\n" withAttributes: shortHeightAttr];
@@ -776,6 +749,7 @@ static HBMixdownTransformer    *mixdownTransformer;
     {
         if (audioTrack.isEnabled)
         {
+            [info appendFormat: @"%lu: ", (unsigned long)audioTrack.sourceTrackIdx - 1];
             const char *encoder = hb_audio_encoder_get_name(audioTrack.encoder);
             if (encoder)
             {
@@ -795,7 +769,8 @@ static HBMixdownTransformer    *mixdownTransformer;
             [info appendString:@"\n"];
         }
 
-        if (index == 1) {
+        if (index == 1)
+        {
             break;
         }
         index += 1;
@@ -904,81 +879,10 @@ static HBMixdownTransformer    *mixdownTransformer;
 - (NSString *)filtersShortDescription
 {
     NSMutableString *summary = [NSMutableString string];
-    HBFilters *filters = self.filters;
 
-    // Detelecine
-    if (![filters.detelecine isEqualToString:@"off"])
+    for (HBFilter *filter in self.filters.filters)
     {
-        [summary appendString:HBKitLocalizedString(@"Detelecine", @"HBJob -> filters short description")];
-        [summary appendString:@", "];
-    }
-
-    // Comb detect
-    if (![filters.combDetection isEqualToString:@"off"])
-    {
-        [summary appendString:HBKitLocalizedString(@"Comb Detect", @"HBJob -> filters short description")];
-        [summary appendString:@", "];
-    }
-
-    // Deinterlace
-    if (![filters.deinterlace isEqualToString:@"off"])
-    {
-        // Deinterlace or Decomb
-        NSString *type = [[[HBFilters deinterlaceTypesDict] allKeysForObject:filters.deinterlace] firstObject];
-        if (type)
-        {
-            [summary appendString:type];
-            [summary appendString:@", "];
-        }
-    }
-
-    // Deblock
-    if (![filters.deblock isEqualToString:@"off"])
-    {
-        [summary appendString:HBKitLocalizedString(@"Deblock", @"HBJob -> filters short description")];
-        [summary appendString:@", "];
-    }
-
-    // Denoise
-    if (![filters.denoise isEqualToString:@"off"])
-    {
-        NSString *type = [[[HBFilters denoiseTypesDict] allKeysForObject:filters.denoise] firstObject];
-        if (type)
-        {
-            [summary appendString:type];
-            [summary appendString:@", "];
-        }
-    }
-
-    // Chroma Smooth
-    if (![filters.chromaSmooth isEqualToString:@"off"])
-    {
-        [summary appendString:HBKitLocalizedString(@"Chroma Smooth", @"HBJob -> filters short description")];
-        [summary appendString:@", "];
-    }
-
-    // Sharpen
-    if (![filters.sharpen isEqualToString:@"off"])
-    {
-        NSString *type = [[[HBFilters sharpenTypesDict] allKeysForObject:filters.sharpen] firstObject];
-        if (type)
-        {
-            [summary appendString:type];
-            [summary appendString:@", "];
-        }
-    }
-
-    // Grayscale
-    if (filters.grayscale)
-    {
-        [summary appendString:HBKitLocalizedString(@"Grayscale", @"HBJob -> filters short description")];
-        [summary appendString:@", "];
-    }
-
-    // Colorspace
-    if (![filters.colorspace isEqualToString:@"off"])
-    {
-        [summary appendString:HBKitLocalizedString(@"Colorspace", @"HBJob -> filters short description")];
+        [summary appendString:filter.localizedName];
         [summary appendString:@", "];
     }
 
@@ -1010,6 +914,10 @@ static HBMixdownTransformer    *mixdownTransformer;
     if (container & HB_MUX_MASK_MP4)
     {
         return @"MP4";
+    }
+    if (container & HB_MUX_MASK_MOV)
+    {
+        return @"MOV";
     }
     else if (container & HB_MUX_MASK_MKV)
     {
@@ -1043,6 +951,10 @@ static HBMixdownTransformer    *mixdownTransformer;
     if ([value isEqualToString:@"MP4"])
     {
         return @(HB_MUX_AV_MP4);
+    }
+    if ([value isEqualToString:@"MOV"])
+    {
+        return @(HB_MUX_AV_MOV);
     }
     else if ([value isEqualToString:@"MKV"])
     {

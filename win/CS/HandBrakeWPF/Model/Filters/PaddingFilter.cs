@@ -11,17 +11,26 @@ namespace HandBrakeWPF.Model.Filters
 {
     public class PaddingFilter
     {
-        public bool Enabled { get; set; }
+        public PaddingFilter()
+        {
+        }
+
+        public PaddingFilter(PaddingFilter filter)
+        {
+            this.Mode = filter.Mode;
+            this.Color = filter.Color;
+            this.X = filter.X;
+            this.Y = filter.Y;
+            this.W = filter.W;
+            this.H = filter.H;
+        }
 
         public string Color { get; set; }
 
-        public string Mode 
+        public PaddingMode Mode
         {
-            get
-            {
-                // TODO support "fillWidth" and "fillHeight"
-                return this.Enabled ? "custom" : "none";
-            }
+            get;
+            set;
         }
 
         /* (X,Y) position of the picture on the frame */
@@ -56,7 +65,7 @@ namespace HandBrakeWPF.Model.Filters
 
         /* Set from imported preset*/
 
-        public void Set(int top, int bottom, int left, int right, string colour, string mode)
+        public void Set(int top, int bottom, int left, int right, string colour, PaddingMode mode)
         {
             // Figure the X,Y coordinate 
             this.X = left;
@@ -67,22 +76,7 @@ namespace HandBrakeWPF.Model.Filters
             this.H = top + bottom;
 
             this.Color = colour;
-
-            switch (mode)
-            {
-                case "none":
-                    this.Enabled = false;
-                    break;
-                case "custom":
-                    this.Enabled = true;
-                    break;
-                case "fillWidth": // TODO, not supported yet
-                    this.Enabled = true;
-                    break;
-                case "fillHeight": // TODO, not supported yet
-                    this.Enabled = true;
-                    break;
-            }
+            this.Mode = mode;
         }
     }
 }

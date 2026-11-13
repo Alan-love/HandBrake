@@ -31,13 +31,13 @@ NSString *HBChaptersChangedNotification  = @"HBChaptersChangedNotification";
  regenerate it each time
  */
 @property (nonatomic, readonly) NSData *fileURLBookmark;
-@property (nonatomic, readwrite) NSData *outputURLFolderBookmark;
+@property (nonatomic, readwrite) NSData *destinationFolderURLBookmark;
 
 /**
  Keep track of security scoped resources status.
  */
 @property (nonatomic, readwrite) HBSecurityAccessToken *fileURLToken;
-@property (nonatomic, readwrite) HBSecurityAccessToken *outputURLToken;
+@property (nonatomic, readwrite) HBSecurityAccessToken *destinationFolderURLToken;
 @property (nonatomic, readwrite) HBSecurityAccessToken *subtitlesToken;
 @property (nonatomic, readwrite) NSInteger accessCount;
 
@@ -45,7 +45,7 @@ NSString *HBChaptersChangedNotification  = @"HBChaptersChangedNotification";
 
 @implementation HBJob
 
-- (instancetype)initWithTitle:(HBTitle *)title andPreset:(HBPreset *)preset
+- (nullable instancetype)initWithTitle:(HBTitle *)title preset:(HBPreset *)preset subtitles:(NSArray<NSURL *> *)subtitlesURLs
 {
     self = [super init];
     if (self) {
@@ -54,6 +54,8 @@ NSString *HBChaptersChangedNotification  = @"HBChaptersChangedNotification";
 
         _title = title;
         _titleIdx = title.index;
+        _keepDuplicateTitles = title.keepDuplicateTitles;
+        _stream = title.isStream;
 
         _name = [title.name copy];
         _fileURL = title.url;
@@ -64,7 +66,7 @@ NSString *HBChaptersChangedNotification  = @"HBChaptersChangedNotification";
         _range = [[HBRange alloc] initWithTitle:title];
         _video = [[HBVideo alloc] initWithJob:self];
         _picture = [[HBPicture alloc] initWithTitle:title];
-        _filters = [[HBFilters alloc] init];
+        _filters = [[HBVideoFilters alloc] init];
 
         _audio = [[HBAudio alloc] initWithJob:self];
         _subtitles = [[HBSubtitles alloc] initWithJob:self];
@@ -73,37 +75,67 @@ NSString *HBChaptersChangedNotification  = @"HBChaptersChangedNotification";
         _metadataPassthru = YES;
         _presetName = @"";
 
-        [self applyPreset:preset];
+        for (NSURL *url in subtitlesURLs)
+        {
+            [self.subtitles addExternalSourceTrackFromURL:url addImmediately:NO];
+        }
+
+        if ([self applyPreset:preset error:NULL] == NO)
+        {
+            return nil;
+        }
     }
 
     return self;
 }
 
+- (nullable instancetype)initWithTitle:(HBTitle *)title preset:(HBPreset *)preset
+{
+    self = [self initWithTitle:title preset:preset subtitles:@[]];
+    return self;
+}
+
 #pragma mark - HBPresetCoding
 
-- (void)applyPreset:(HBPreset *)preset
+- (BOOL)applyPreset:(HBPreset *)preset error:(NSError * __autoreleasing *)outError
 {
     NSAssert(self.title, @"HBJob: calling applyPreset: without a valid title loaded");
 
-    self.presetName = preset.name;
     NSDictionary *jobSettings = [self.title jobSettingsWithPreset:preset];
 
-    self.container = hb_container_get_from_name([preset[@"FileFormat"] UTF8String]);
+    if (jobSettings)
+    {
+        self.presetName = preset.name;
 
-    // MP4 specifics options.
-    self.mp4HttpOptimize = [preset[@"Mp4HttpOptimize"] boolValue];
-    self.mp4iPodCompatible = [preset[@"Mp4iPodCompatible"] boolValue];
+        self.container = hb_container_get_from_name([preset[@"FileFormat"] UTF8String]);
 
-    self.alignAVStart = [preset[@"AlignAVStart"] boolValue];
+        // MP4 specifics options.
+        self.optimize = [preset[@"Optimize"] boolValue];
+        self.mp4iPodCompatible = [preset[@"Mp4iPodCompatible"] boolValue];
 
-    self.chaptersEnabled = [preset[@"ChapterMarkers"] boolValue];
-    self.metadataPassthru = [preset[@"MetadataPassthrough"] boolValue];
+        self.alignAVStart = [preset[@"AlignAVStart"] boolValue];
 
-    [self.audio applyPreset:preset jobSettings:jobSettings];
-    [self.subtitles applyPreset:preset jobSettings:jobSettings];
-    [self.video applyPreset:preset jobSettings:jobSettings];
-    [self.picture applyPreset:preset jobSettings:jobSettings];
-    [self.filters applyPreset:preset jobSettings:jobSettings];
+        self.chaptersEnabled = [preset[@"ChapterMarkers"] boolValue];
+        self.metadataPassthru = [preset[@"MetadataPassthru"] boolValue];
+
+        [self.audio applyPreset:preset jobSettings:jobSettings];
+        [self.subtitles applyPreset:preset jobSettings:jobSettings];
+        [self.video applyPreset:preset jobSettings:jobSettings];
+        [self.picture applyPreset:preset jobSettings:jobSettings];
+        [self.filters applyPreset:preset jobSettings:jobSettings];
+
+        return YES;
+    }
+    else
+    {
+        if (outError != NULL)
+        {
+            *outError = [NSError errorWithDomain:@"HBError" code:0 userInfo:@{NSLocalizedDescriptionKey: NSLocalizedString(@"Invalid preset", @"HBJob -> invalid preset"),
+                                                                          NSLocalizedRecoverySuggestionErrorKey: NSLocalizedString(@"The preset is not a valid, try to select a different one.", @"Job preset -> invalid preset recovery suggestion")}];
+        }
+
+        return NO;
+    }
 }
 
 - (void)writeToPreset:(HBMutablePreset *)preset
@@ -113,12 +145,12 @@ NSString *HBChaptersChangedNotification  = @"HBChaptersChangedNotification";
     preset[@"FileFormat"] = @(hb_container_get_short_name(self.container));
 
     // MP4 specifics options.
-    preset[@"Mp4HttpOptimize"] = @(self.mp4HttpOptimize);
+    preset[@"Optimize"] = @(self.optimize);
     preset[@"AlignAVStart"] = @(self.alignAVStart);
     preset[@"Mp4iPodCompatible"] = @(self.mp4iPodCompatible);
 
     preset[@"ChapterMarkers"] = @(self.chaptersEnabled);
-    preset[@"MetadataPassthrough"] = @(self.metadataPassthru);
+    preset[@"MetadataPassthru"] = @(self.metadataPassthru);
 
     [@[self.video, self.filters, self.picture, self.audio, self.subtitles] makeObjectsPerformSelector:@selector(writeToPreset:)
                                                                                                            withObject:preset];
@@ -141,30 +173,30 @@ NSString *HBChaptersChangedNotification  = @"HBChaptersChangedNotification";
     _presetName = [presetName copy];
 }
 
-- (void)setOutputURL:(NSURL *)outputURL
+- (void)setDestinationFolderURL:(NSURL *)destinationFolderURL
 {
-    if (![outputURL isEqualTo:_outputURL])
+    if (![destinationFolderURL isEqualTo:_destinationFolderURL])
     {
-        [[self.undo prepareWithInvocationTarget:self] setOutputURL:_outputURL];
+        [[self.undo prepareWithInvocationTarget:self] setDestinationFolderURL:_destinationFolderURL];
     }
-    _outputURL = [outputURL copy];
+    _destinationFolderURL = [destinationFolderURL copy];
 
 #ifdef __SANDBOX_ENABLED__
     // Clear the bookmark to regenerate it later
-    self.outputURLFolderBookmark = nil;
+    self.destinationFolderURLBookmark = nil;
 #endif
 }
 
-- (void)setOutputFileName:(NSString *)outputFileName
+- (void)setDestinationFileName:(NSString *)destinationFileName
 {
-    if (![outputFileName isEqualTo:_outputFileName])
+    if (![destinationFileName isEqualTo:_destinationFileName])
     {
-        [[self.undo prepareWithInvocationTarget:self] setOutputFileName:_outputFileName];
+        [[self.undo prepareWithInvocationTarget:self] setDestinationFileName:_destinationFileName];
     }
-    _outputFileName = [outputFileName copy];
+    _destinationFileName = [destinationFileName copy];
 }
 
-- (BOOL)validateOutputFileName:(id *)ioValue error:(NSError * __autoreleasing *)outError
+- (BOOL)validateDestinationFileName:(id *)ioValue error:(NSError * __autoreleasing *)outError
 {
     BOOL retval = YES;
 
@@ -205,9 +237,9 @@ NSString *HBChaptersChangedNotification  = @"HBChaptersChangedNotification";
     return retval;
 }
 
-- (NSURL *)completeOutputURL
+- (NSURL *)destinationURL
 {
-    return [self.outputURL URLByAppendingPathComponent:self.outputFileName];
+    return [self.destinationFolderURL URLByAppendingPathComponent:self.destinationFileName isDirectory:NO];
 }
 
 - (void)setContainer:(int)container
@@ -240,15 +272,16 @@ NSString *HBChaptersChangedNotification  = @"HBChaptersChangedNotification";
 {
     _title = title;
     self.range.title = title;
+    _keepDuplicateTitles = title.keepDuplicateTitles;
 }
 
-- (void)setMp4HttpOptimize:(BOOL)mp4HttpOptimize
+- (void)setOptimize:(BOOL)optimize
 {
-    if (mp4HttpOptimize != _mp4HttpOptimize)
+    if (optimize != _optimize)
     {
-        [[self.undo prepareWithInvocationTarget:self] setMp4HttpOptimize:_mp4HttpOptimize];
+        [[self.undo prepareWithInvocationTarget:self] setOptimize:_optimize];
     }
-    _mp4HttpOptimize = mp4HttpOptimize;
+    _optimize = optimize;
 
     [[NSNotificationCenter defaultCenter] postNotificationName:HBContainerChangedNotification object:self];
 }
@@ -310,12 +343,12 @@ NSString *HBChaptersChangedNotification  = @"HBChaptersChangedNotification";
             _fileURL = resolvedURL;
         }
     }
-    if (_outputURLFolderBookmark)
+    if (_destinationFolderURLBookmark)
     {
-        NSURL *resolvedURL = [HBUtilities URLFromBookmark:_outputURLFolderBookmark];
+        NSURL *resolvedURL = [HBUtilities URLFromBookmark:_destinationFolderURLBookmark];
         if (resolvedURL)
         {
-            _outputURL = resolvedURL;
+            _destinationFolderURL = resolvedURL;
         }
     }
     [self.subtitles refreshSecurityScopedResources];
@@ -327,7 +360,7 @@ NSString *HBChaptersChangedNotification  = @"HBChaptersChangedNotification";
     if (self.accessCount == 0)
     {
         self.fileURLToken = [HBSecurityAccessToken tokenWithObject:self.fileURL];
-        self.outputURLToken = [HBSecurityAccessToken tokenWithObject:self.outputURL];
+        self.destinationFolderURLToken = [HBSecurityAccessToken tokenWithObject:self.destinationFolderURL];
         self.subtitlesToken = [HBSecurityAccessToken tokenWithObject:self.subtitles];
     }
     self.accessCount += 1;
@@ -345,7 +378,7 @@ NSString *HBChaptersChangedNotification  = @"HBChaptersChangedNotification";
     if (self.accessCount == 0)
     {
         self.fileURLToken = nil;
-        self.outputURLToken = nil;
+        self.destinationFolderURLToken = nil;
         self.subtitlesToken = nil;
     }
 #endif
@@ -362,17 +395,18 @@ NSString *HBChaptersChangedNotification  = @"HBChaptersChangedNotification";
         copy->_name = [_name copy];
         copy->_presetName = [_presetName copy];
         copy->_titleIdx = _titleIdx;
+        copy->_stream = _stream;
 
         copy->_fileURLBookmark = [_fileURLBookmark copy];
-        copy->_outputURLFolderBookmark = [_outputURLFolderBookmark copy];
+        copy->_destinationFolderURLBookmark = [_destinationFolderURLBookmark copy];
 
         copy->_fileURL = [_fileURL copy];
-        copy->_outputURL = [_outputURL copy];
-        copy->_outputFileName = [_outputFileName copy];
+        copy->_destinationFolderURL = [_destinationFolderURL copy];
+        copy->_destinationFileName = [_destinationFileName copy];
 
         copy->_container = _container;
         copy->_angle = _angle;
-        copy->_mp4HttpOptimize = _mp4HttpOptimize;
+        copy->_optimize = _optimize;
         copy->_mp4iPodCompatible = _mp4iPodCompatible;
         copy->_alignAVStart = _alignAVStart;
 
@@ -392,6 +426,8 @@ NSString *HBChaptersChangedNotification  = @"HBChaptersChangedNotification";
         copy->_chapterTitles = [[NSArray alloc] initWithArray:_chapterTitles copyItems:YES];
 
         copy->_metadataPassthru = _metadataPassthru;
+        copy->_hwDecodeUsage = _hwDecodeUsage;
+        copy->_keepDuplicateTitles = _keepDuplicateTitles;
     }
 
     return copy;
@@ -404,13 +440,16 @@ NSString *HBChaptersChangedNotification  = @"HBChaptersChangedNotification";
     return YES;
 }
 
+#define HB_JOB_VERSION 7
+
 - (void)encodeWithCoder:(NSCoder *)coder
 {
-    [coder encodeInt:5 forKey:@"HBJobVersion"];
+    [coder encodeInt:HB_JOB_VERSION forKey:@"HBJobVersion"];
 
     encodeObject(_name);
     encodeObject(_presetName);
     encodeInt(_titleIdx);
+    encodeBool(_stream);
 
 #ifdef __SANDBOX_ENABLED__
     if (!_fileURLBookmark)
@@ -422,24 +461,24 @@ NSString *HBChaptersChangedNotification  = @"HBChaptersChangedNotification";
 
     encodeObject(_fileURLBookmark);
 
-    if (!_outputURLFolderBookmark)
+    if (!_destinationFolderURLBookmark)
     {
-        __attribute__((unused)) HBSecurityAccessToken *token = [HBSecurityAccessToken tokenWithObject:_outputURL];
-        _outputURLFolderBookmark = [HBUtilities bookmarkFromURL:_outputURL];
+        __attribute__((unused)) HBSecurityAccessToken *token = [HBSecurityAccessToken tokenWithObject:_destinationFolderURL];
+        _destinationFolderURLBookmark = [HBUtilities bookmarkFromURL:_destinationFolderURL];
         token = nil;
     }
 
-    encodeObject(_outputURLFolderBookmark);
+    encodeObject(_destinationFolderURLBookmark);
 
 #endif
 
     encodeObject(_fileURL);
-    encodeObject(_outputURL);
-    encodeObject(_outputFileName);
+    encodeObject(_destinationFolderURL);
+    encodeObject(_destinationFileName);
 
     encodeInt(_container);
     encodeInt(_angle);
-    encodeBool(_mp4HttpOptimize);
+    encodeBool(_optimize);
     encodeBool(_mp4iPodCompatible);
     encodeBool(_alignAVStart);
 
@@ -455,36 +494,39 @@ NSString *HBChaptersChangedNotification  = @"HBChaptersChangedNotification";
     encodeObject(_chapterTitles);
 
     encodeBool(_metadataPassthru);
+    encodeInteger(_hwDecodeUsage);
+    encodeBool(_keepDuplicateTitles);
 }
 
 - (instancetype)initWithCoder:(NSCoder *)decoder
 {
     int version = [decoder decodeIntForKey:@"HBJobVersion"];
 
-    if (version == 5 && (self = [super init]))
+    if (version == HB_JOB_VERSION && (self = [super init]))
     {
         decodeObjectOrFail(_name, NSString);
         decodeObjectOrFail(_presetName, NSString);
         decodeInt(_titleIdx); if (_titleIdx < 0) { goto fail; }
+        decodeBool(_stream);
 
 #ifdef __SANDBOX_ENABLED__
-        decodeObject(_fileURLBookmark, NSData)
-        decodeObject(_outputURLFolderBookmark, NSData)
+        decodeObject(_fileURLBookmark, NSData);
+        decodeObject(_destinationFolderURLBookmark, NSData);
 #endif
         decodeObjectOrFail(_fileURL, NSURL);
-        decodeObject(_outputURL, NSURL);
-        decodeObject(_outputFileName, NSString);
+        decodeObject(_destinationFolderURL, NSURL);
+        decodeObject(_destinationFileName, NSString);
 
-        decodeInt(_container); if (_container != HB_MUX_MP4 && _container != HB_MUX_MKV && _container != HB_MUX_WEBM) { goto fail; }
+        decodeContainerOrFail(_container);
         decodeInt(_angle); if (_angle < 0) { goto fail; }
-        decodeBool(_mp4HttpOptimize);
+        decodeBool(_optimize);
         decodeBool(_mp4iPodCompatible);
         decodeBool(_alignAVStart);
 
         decodeObjectOrFail(_range, HBRange);
         decodeObjectOrFail(_video, HBVideo);
         decodeObjectOrFail(_picture, HBPicture);
-        decodeObjectOrFail(_filters, HBFilters);
+        decodeObjectOrFail(_filters, HBVideoFilters);
 
         _video.job = self;
 
@@ -498,6 +540,8 @@ NSString *HBChaptersChangedNotification  = @"HBChaptersChangedNotification";
         decodeCollectionOfObjectsOrFail(_chapterTitles, NSArray, HBChapter);
 
         decodeBool(_metadataPassthru);
+        decodeInteger(_hwDecodeUsage); if (_hwDecodeUsage != HBJobHardwareDecoderUsageNone && _hwDecodeUsage != HBJobHardwareDecoderUsageAlways && _hwDecodeUsage != HBJobHardwareDecoderUsageFullPathOnly) { goto fail; }
+        decodeBool(_keepDuplicateTitles);
 
         return self;
     }

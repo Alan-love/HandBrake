@@ -1,6 +1,6 @@
 /* avfilter_priv.h
 
-   Copyright (c) 2003-2021 HandBrake Team
+   Copyright (c) 2003-2026 HandBrake Team
    This file is part of the HandBrake source code
    Homepage: <http://handbrake.fr/>.
    It may be used under the terms of the GNU General Public License v2.
@@ -25,6 +25,8 @@ struct hb_filter_private_s
     hb_value_t          * avfilters;
     hb_filter_init_t      input;
     hb_filter_init_t      output;
+
+    int                   delay;
 };
 
 int  hb_avfilter_null_work( hb_filter_object_t * filter,

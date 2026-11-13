@@ -6,18 +6,18 @@
 
 namespace HandBrakeWPF.ViewModelItems.Filters
 {
-    using System.Collections.Generic;
+    using System.ComponentModel;
+    using System.Linq;
 
-    using Caliburn.Micro;
+    using HandBrake.App.Core.Utilities;
 
     using HandBrakeWPF.Model.Filters;
     using HandBrakeWPF.Services.Encode.Model;
     using HandBrakeWPF.Services.Presets.Model;
     using HandBrakeWPF.Services.Scan.Model;
-    using HandBrakeWPF.Utilities;
+    using HandBrakeWPF.ViewModels;
 
     using Action = System.Action;
-
     public class PadFilter : PropertyChangedBase
     {
         private readonly Action triggerTabChanged;
@@ -40,7 +40,7 @@ namespace HandBrakeWPF.ViewModelItems.Filters
             private set => this.currentTask = value;
         }
 
-        public IEnumerable<PaddingMode> PaddingModes => EnumHelper<PaddingMode>.GetEnumList();
+        public BindingList<PaddingMode> PaddingModes => new BindingList<PaddingMode>(EnumHelper<PaddingMode>.GetEnumList().ToList());
 
         public PaddingMode Mode
         {
@@ -49,27 +49,40 @@ namespace HandBrakeWPF.ViewModelItems.Filters
             {
                 this.mode = value;
                 this.IsCustomPaddingEnabled = false;
+                this.CurrentTask.Padding.Mode = value;  
 
                 switch (value)
                 {
                     case PaddingMode.Custom:
-                        this.currentTask.Padding.Enabled = true;
                         IsCustomPaddingEnabled = true;
                         break;
+
+                    case PaddingMode.Fill:
+                    case PaddingMode.FillHeight:
+                    case PaddingMode.FillWidth:
+                        IsCustomPaddingEnabled = false;
+                        break;
+
                     case PaddingMode.None:
                     default:
-                        this.currentTask.Padding.Enabled = false;
+                        this.Reset();
                         break;
                 }
 
+                ApplyPad(value);
+
+                this.NotifyOfPropertyChange(() => this.Mode);
                 this.NotifyOfPropertyChange(() => this.IsCustomPaddingEnabled);
                 this.NotifyOfPropertyChange(() => this.IsCustomColourVisible);
+                this.NotifyOfPropertyChange(() => this.IsPaddingEnabled);
             }
         }
 
         public bool IsCustomPaddingEnabled { get; set; }
 
-        public IEnumerable<PadColour> PaddingColours => EnumHelper<PadColour>.GetEnumList();
+        public bool IsPaddingEnabled => this.Mode != PaddingMode.None;
+
+        public BindingList<PadColour> PaddingColours => new BindingList<PadColour>(EnumHelper<PadColour>.GetEnumList().ToList());
 
         public PadColour Colour
         {
@@ -100,7 +113,7 @@ namespace HandBrakeWPF.ViewModelItems.Filters
             }
         }
 
-        public bool IsCustomColourVisible => this.IsCustomPaddingEnabled && this.Colour == PadColour.Custom;
+        public bool IsCustomColourVisible => this.IsPaddingEnabled && this.Colour == PadColour.Custom;
 
         public int Top
         {
@@ -183,11 +196,37 @@ namespace HandBrakeWPF.ViewModelItems.Filters
         public void UpdateTask(EncodeTask task)
         {
             this.CurrentTask = task;
+
+            if (this.CurrentTask.Padding == null)
+            {
+                this.Reset();
+                return;
+            }
+
+            this.Mode = task.Padding.Mode;
+
+            int padTop = task.Padding.Y;
+            int padLeft = task.Padding.X;
+            int padBottom = task.Padding.H - padTop;
+            int padRight = task.Padding.W - padLeft;
+
+            this.SetRotationValues(padTop, padBottom, padLeft, padRight);
+
+            PadColour padColour = EnumHelper<PadColour>.GetValue(task.Padding.Color);
+            if (padColour == PadColour.Black && task.Padding.Color != EnumHelper<PadColour>.GetShortName(PadColour.Black))
+            {
+                this.Colour = PadColour.Custom;
+                this.CustomColour = task.Padding.Color;
+            }
+            else
+            {
+                this.Colour = PadColour.Black;
+            }
         }
 
         public bool MatchesPreset(Preset preset)
         {
-            if (preset.Task.Padding.Enabled && Mode != PaddingMode.None)
+            if (!this.CurrentTask.Padding.Mode.Equals(preset.Task.Padding.Mode))
             {
                 return false;
             }
@@ -202,21 +241,26 @@ namespace HandBrakeWPF.ViewModelItems.Filters
 
         private void SetColour()
         {
-            switch (this.Colour)
+            if (!string.IsNullOrEmpty(this.customColour?.Trim()))
             {
-                case PadColour.Black:
-                    this.CurrentTask.Padding.Color = "black";
-                    break;
-                case PadColour.White:
-                    this.CurrentTask.Padding.Color = "white";
-                    break;
-                case PadColour.Custom:
-                    this.CurrentTask.Padding.Color = CustomColour?.Trim().ToLower();
-                    break;
-                default:
-                    this.CurrentTask.Padding.Color = "black";
-                    break;
+                this.CurrentTask.Padding.Color = CustomColour?.Trim().ToLower();
             }
+            else
+            {
+                this.CurrentTask.Padding.Color = EnumHelper<PadColour>.GetShortName(this.Colour);
+            }
+        }
+
+        private void Reset()
+        {
+            this.mode = PaddingMode.None;
+            this.Top = 0;
+            this.Bottom = 0;
+            this.Left = 0;
+            this.Right = 0;
+            this.Colour = PadColour.Black;
+
+            this.NotifyOfPropertyChange(() => this.Mode);
         }
 
         public void SetPreset(Preset preset, EncodeTask task)
@@ -228,7 +272,63 @@ namespace HandBrakeWPF.ViewModelItems.Filters
                 return;
             }
 
-            this.NotifyOfPropertyChange(() => this.Colour);
+            this.Reset();
+            this.Mode = preset.Task.Padding.Mode;
+
+            if (this.Mode == PaddingMode.Custom)
+            {
+                int padTop = preset.Task.Padding.Y;
+                int padLeft = preset.Task.Padding.X;
+                int padBottom = preset.Task.Padding.H - padTop;
+                int padRight = preset.Task.Padding.W - padLeft;
+
+                this.SetRotationValues(padTop, padBottom, padLeft, padRight);
+            }
+            
+            PadColour padColour = EnumHelper<PadColour>.GetValue(preset.Task.Padding.Color);
+            if (padColour == PadColour.Black && preset.Task.Padding.Color != EnumHelper<PadColour>.GetShortName(PadColour.Black))
+            {
+                this.Colour = PadColour.Custom;
+                this.CustomColour = preset.Task.Padding.Color;
+            }
+            else
+            {
+                this.Colour = PadColour.Black;
+            }
+        }
+
+        private void ApplyPad(PaddingMode mode)
+        {
+            bool fillwidth, fillheight;
+            int[] pad = { 0, 0, 0, 0 };
+
+            fillwidth = fillheight = mode == PaddingMode.Fill;
+            fillheight = fillheight || (mode == PaddingMode.FillHeight);
+            fillwidth = fillwidth || (mode == PaddingMode.FillWidth);
+
+            if (mode == PaddingMode.Custom)
+            {
+                pad[0] = this.Top;
+                pad[1] = this.Bottom;
+                pad[2] = this.Left;
+                pad[3] = this.Right;
+            }
+
+            if (fillheight && this.currentTask.MaxHeight > 0)
+            {
+                pad[0] = (this.currentTask.MaxHeight.Value - this.currentTask.Height.Value) / 2;
+                pad[1] = this.currentTask.MaxHeight.Value - this.currentTask.Height.Value - pad[0];
+            }
+            if (fillwidth && this.currentTask.MaxWidth > 0)
+            {
+                pad[2] = (this.currentTask.MaxWidth.Value - this.currentTask.Width.Value) / 2;
+                pad[3] = this.currentTask.MaxWidth.Value - this.currentTask.Width.Value - pad[2];
+            }
+
+            this.Top = pad[0];
+            this.Bottom = pad[1];
+            this.Left = pad[2];
+            this.Right = pad[3];
         }
     }
 }

@@ -9,15 +9,15 @@
 
 namespace HandBrake.Interop.Interop
 {
-    using System;
-    using System.Collections.Generic;
-    using System.Linq;
-
     using HandBrake.Interop.Interop.HbLib;
     using HandBrake.Interop.Interop.Helpers;
     using HandBrake.Interop.Interop.Interfaces.Model;
     using HandBrake.Interop.Interop.Interfaces.Model.Encoders;
-    using HandBrake.Interop.Utilities;
+    using System;
+    using System.Collections.Generic;
+    using System.Linq;
+    using System.Runtime.InteropServices;
+    using System.Xml.Linq;
 
     public static class HandBrakeEncoderHelpers
     {
@@ -40,6 +40,19 @@ namespace HandBrake.Interop.Interop
             }
         }
 
+        public static List<string> GetMetadataKeys(int mux)
+        {
+            List<string> keys = new List<string>();
+            int index = 0;
+            IntPtr key;
+            while ((key = HBFunctions.hb_metadata_key_get_next(mux, ref index)) != IntPtr.Zero)
+            {
+                keys.Add(InteropUtilities.ToStringFromUtf8Ptr(key));
+            }
+
+            return keys;
+        }
+
         /// <summary>
         /// Gets a list of supported audio encoders.
         /// </summary>
@@ -55,6 +68,8 @@ namespace HandBrake.Interop.Interop
                 return audioEncoders;
             }
         }
+
+        public static HBAudioEncoder NoneAudioEncoder => AudioEncoders.FirstOrDefault(s => s.CodecName == "None");
 
         /// <summary>
         /// Gets a list of supported video encoders.
@@ -87,7 +102,7 @@ namespace HandBrake.Interop.Interop
                 return videoFramerates;
             }
         }
-
+        
         /// <summary>
         /// Gets a list of supported mixdowns.
         /// </summary>
@@ -202,11 +217,28 @@ namespace HandBrake.Interop.Interop
             return AudioEncoders.SingleOrDefault(e => e.Id == codecId);
         }
 
+        /// <summary>
+        /// Gets the default audio encoder for the given container.
+        /// </summary>
+        /// <param name="muxer">The container ID.</param>
+        /// <returns>The codec ID of the default audio encoder.</returns>
+        public static int GetDefaultAudioEncoder(int muxer)
+        {
+            return HBFunctions.hb_audio_encoder_get_default(muxer);
+        }
+
         public static HBAudioEncoder GetAutoPassthruEncoder(int inputCodec, int copyMask, int fallback, int muxer)
         {
            int encoder = HBFunctions.hb_autopassthru_get_encoder(inputCodec, copyMask, fallback, muxer);
 
            return GetAudioEncoder(encoder);
+        }
+
+        public static HBAudioEncoder GetPassthruFallback(int passthru)
+        {
+            int encoder = HBFunctions.hb_audio_encoder_get_fallback_for_passthru(passthru);
+
+            return GetAudioEncoder(encoder);
         }
 
         /// <summary>
@@ -221,6 +253,16 @@ namespace HandBrake.Interop.Interop
         public static HBVideoEncoder GetVideoEncoder(string shortName)
         {
             return VideoEncoders.SingleOrDefault(e => e.ShortName == shortName);
+        }
+
+        /// <summary>
+        /// Gets the default video encoder for the given container.
+        /// </summary>
+        /// <param name="muxer">The container ID.</param>
+        /// <returns>The codec ID of the default video encoder.</returns>
+        public static int GetDefaultVideoEncoder(int muxer)
+        {
+            return HBFunctions.hb_video_encoder_get_default(muxer);
         }
 
         /// <summary>
@@ -259,6 +301,56 @@ namespace HandBrake.Interop.Interop
         public static HBContainer GetContainer(string shortName)
         {
             return Containers.SingleOrDefault(c => c.ShortName == shortName);
+        }
+
+        public static bool VideoEncoderSupportsMultiPass(string encoderShortName, bool constantQuality)
+        {
+            HBVideoEncoder encoder = GetVideoEncoder(encoderShortName);
+
+            if (encoder != null)
+            {
+                return VideoEncoderSupportsMultiPass(encoder.Id, constantQuality);
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Returns true if the given video encoder supports multi-pass mode.
+        /// </summary>
+        /// <param name="encoderId">
+        /// The encoder ID.
+        /// </param>
+        /// <returns>
+        /// True if the given video encoder supports multi-pass mode.
+        /// </returns>
+        public static bool VideoEncoderSupportsMultiPass(int encoderId, bool constantQuality)
+        {
+            return HBFunctions.hb_video_multipass_is_supported((uint)encoderId, Convert.ToInt32(constantQuality)) > 0;
+        }
+
+        public static bool VideoEncoderSupportsQualityMode(string encoderShortName)
+        {
+            HBVideoEncoder encoder = GetVideoEncoder(encoderShortName);
+
+            if (encoder != null)
+            {
+                return HBFunctions.hb_video_quality_is_supported(encoder.Id) > 0;
+            }
+
+            return false;
+        }
+
+        public static bool VideoEncoderSupportsBitrateMode(string encoderShortName)
+        {
+            HBVideoEncoder encoder = GetVideoEncoder(encoderShortName);
+
+            if (encoder != null)
+            {
+                return HBFunctions.hb_video_bitrate_is_supported(encoder.Id) > 0;
+            }
+
+            return false;
         }
 
         /// <summary>
@@ -301,7 +393,7 @@ namespace HandBrake.Interop.Interop
         /// <returns>
         /// True if the subtitle type can be passed through with the given muxer.
         /// </returns>
-        public static bool SubtitleCanPassthrough(int subtitleSourceType, int muxer)
+        public static bool SubtitleCanPassthru(int subtitleSourceType, int muxer)
         {
             return HBFunctions.hb_subtitle_can_pass(subtitleSourceType, muxer) > 0;
         }
@@ -354,7 +446,7 @@ namespace HandBrake.Interop.Interop
         /// True if the given encoder is compatible with the given audio track.
         /// </returns>
         /// <remarks>
-        /// Only works with passthrough encoders.
+        /// Only works with passthru encoders.
         /// </remarks>
         public static bool AudioEncoderIsCompatible(int codecId, HBAudioEncoder encoder)
         {
@@ -406,32 +498,34 @@ namespace HandBrake.Interop.Interop
         /// </param>
         /// <param name="channelLayout">channel layout of the source track</param>
         /// <returns>True if available.</returns>
-        public static bool MixdownIsSupported(HBMixdown mixdown, HBAudioEncoder encoder, long channelLayout)
+        public static bool MixdownIsSupported(HBMixdown mixdown, HBAudioEncoder encoder, string layout)
         {
-            return HBFunctions.hb_mixdown_is_supported(mixdown.Id, (uint)encoder.Id, (uint)channelLayout) > 0;
+            IntPtr layoutptr = IntPtr.Zero;
+            if (layout != null)
+            {
+                layoutptr = InteropUtilities.ToUtf8PtrFromString(layout);
+            }
+            return HBFunctions.hb_mixdown_is_supported_s(mixdown.Id, (uint)encoder.Id, layoutptr) > 0;
         }
 
         /// <summary>
         /// Determines if DRC can be applied to the given track with the given encoder.
         /// </summary>
-        /// <param name="handle">
-        /// The handle.
+        /// <param name="codecId">
+        /// The source audio codec.
         /// </param>
-        /// <param name="trackNumber">
-        /// The track Number.
+        /// <param name="codecParam">
+        /// The source audio codec parameters.
         /// </param>
         /// <param name="encoder">
-        /// The encoder to use for DRC.
-        /// </param>
-        /// <param name="title">
-        /// The title.
+        /// The encoder that will be used.
         /// </param>
         /// <returns>
         /// True if DRC can be applied to the track with the given encoder.
         /// </returns>
-        public static bool CanApplyDrc(IntPtr handle, int trackNumber, HBAudioEncoder encoder, int title)
+        public static bool CanApplyDrc(int codecId, int codecParam, HBAudioEncoder encoder)
         {
-            return HBFunctions.hb_audio_can_apply_drc2(handle, title, trackNumber, encoder.Id) > 0; 
+            return HBFunctions.hb_audio_can_apply_drc((uint)codecId, (uint)codecParam, encoder.Id) > 0;
         }
 
         /// <summary>
@@ -443,7 +537,7 @@ namespace HandBrake.Interop.Interop
         /// <returns>
         /// True if the codec can be passed through.
         /// </returns>
-        public static bool CanPassthroughAudio(int codecId)
+        public static bool CanPassthruAudio(int codecId)
         {
             return (codecId & NativeConstants.HB_ACODEC_PASS_MASK) > 0;
         }
@@ -463,14 +557,16 @@ namespace HandBrake.Interop.Interop
         /// <returns>
         /// A sanitized mixdown value.
         /// </returns>
-        public static HBMixdown SanitizeMixdown(HBMixdown mixdown, HBAudioEncoder encoder, ulong layout)
+        public static HBMixdown SanitizeMixdown(HBMixdown mixdown, HBAudioEncoder encoder, string layout)
         {
-            if (mixdown == null || encoder == null)
+            if (mixdown == null || encoder == null || layout == null)
             {
                 return null;
             }
 
-            int sanitizedMixdown = HBFunctions.hb_mixdown_get_best((uint)encoder.Id, layout, mixdown.Id);
+            IntPtr layoutptr = InteropUtilities.ToUtf8PtrFromString(layout);
+
+            int sanitizedMixdown = HBFunctions.hb_mixdown_get_best_s((uint)encoder.Id, layoutptr, mixdown.Id);
             if (sanitizedMixdown != -1)
             {
                 return Mixdowns.Single(m => m.Id == sanitizedMixdown);
@@ -491,10 +587,21 @@ namespace HandBrake.Interop.Interop
         /// <returns>
         /// The default mixdown for the given codec and channel layout.
         /// </returns>
-        public static HBMixdown GetDefaultMixdown(HBAudioEncoder encoder, ulong layout)
+        public static HBMixdown GetDefaultMixdown(HBAudioEncoder encoder, string layout)
         {
-            int defaultMixdown = HBFunctions.hb_mixdown_get_default((uint)encoder.Id, layout);
-            return Mixdowns.Single(m => m.Id == defaultMixdown);
+            IntPtr layoutptr = IntPtr.Zero;
+            if (layout != null)
+            {
+                layoutptr = InteropUtilities.ToUtf8PtrFromString(layout);
+            }
+            int defaultMixdown = HBFunctions.hb_mixdown_get_default_s((uint)encoder.Id, layoutptr);
+            var result = Mixdowns.SingleOrDefault(m => m.Id == defaultMixdown);
+            if (result == null)
+            {
+                throw new Exception($"No default mixdown found for encoder {encoder.ShortName} and layout {layout}. defaultMixdown: {defaultMixdown}, Mixdown count: {Mixdowns.Count}");
+            }
+
+            return result;
         }
 
         /// <summary>
@@ -532,6 +639,18 @@ namespace HandBrake.Interop.Interop
 
             return new BitrateLimits(low, high);
         }
+        
+        public static VideoQualityLimits GetVideoQualityLimits(string encoderShortName)
+        {
+            HBVideoEncoder encoder = GetVideoEncoder(encoderShortName);
+
+            if (encoder != null)
+            {
+                return GetVideoQualityLimits(encoder);
+            }
+
+            return null;
+        }
 
         /// <summary>
         /// Gets the video quality limits for the given video codec.
@@ -546,12 +665,24 @@ namespace HandBrake.Interop.Interop
         {
             float low = 0;
             float high = 0;
-            float granularity = 0;
+            float granularity = 0.5f;
             int direction = 0;
 
             HBFunctions.hb_video_quality_get_limits((uint)encoder.Id, ref low, ref high, ref granularity, ref direction);
 
             return new VideoQualityLimits(low, high, granularity, direction == 0);
+        }
+
+        public static string GetVideoQualityRateControlName(string encoderShortName)
+        {
+            HBVideoEncoder encoder = GetVideoEncoder(encoderShortName);
+
+            if (encoder != null)
+            {
+                return InteropUtilities.ToStringFromUtf8Ptr(HBFunctions.hb_video_quality_get_name((uint)encoder.Id));
+            }
+
+            return string.Empty;
         }
 
         /// <summary>
@@ -660,55 +791,14 @@ namespace HandBrake.Interop.Interop
         {
             return HBFunctions.hb_audio_compression_get_default((uint)encoder.Id);
         }
-
-        public static uint BuildCopyMask(bool audioAllowMP2Pass, bool audioAllowMP3Pass, bool audioAllowAACPass, bool audioAllowAC3Pass, bool audioAllowDTSPass, bool audioAllowDTSHDPass, bool audioAllowEac3Pass, bool audioAllowFlacPass, bool audioAllowTruehdPass)
+        
+        public static uint BuildCopyMask(IList<HBAudioEncoder> encoderList)
         {
             uint mask = 0;
-
-            if (audioAllowMP2Pass)
+            foreach (HBAudioEncoder encoder in encoderList)
             {
-                mask |= NativeConstants.HB_ACODEC_MP2_PASS;
-            }
-
-            if (audioAllowMP3Pass)
-            {
-                mask |= NativeConstants.HB_ACODEC_MP3_PASS;
-            }
-
-            if (audioAllowAACPass)
-            {
-                mask |= NativeConstants.HB_ACODEC_AAC_PASS;
-            }
-
-            if (audioAllowAC3Pass)
-            {
-                mask |= NativeConstants.HB_ACODEC_AC3_PASS;
-            }
-
-            if (audioAllowDTSPass)
-            {
-                mask |= NativeConstants.HB_ACODEC_DCA_PASS;
-            }
-
-            if (audioAllowDTSHDPass)
-            {
-                mask |= NativeConstants.HB_ACODEC_DCA_HD_PASS;
-            }
-
-            if (audioAllowEac3Pass)
-            {
-                mask |= NativeConstants.HB_ACODEC_EAC3_PASS;
-            }
-
-            if (audioAllowFlacPass)
-            {
-                mask |= NativeConstants.HB_ACODEC_FLAC_PASS;
-            }
-
-            if (audioAllowTruehdPass)
-            {
-                mask |= NativeConstants.HB_ACODEC_TRUEHD_PASS;
-            }
+                mask |= (uint)encoder.Id;
+            }   
 
             return mask;
         }
@@ -725,6 +815,22 @@ namespace HandBrake.Interop.Interop
             }
 
             return new List<int>();
+        }
+
+        public static string GetAutonameAudioTrack(string name, string layout, int mixdown, bool keep_name, int behaviour)
+        {
+            IntPtr nameptr = IntPtr.Zero;
+            IntPtr layoutptr = IntPtr.Zero;
+            if (name != null)
+            {
+                nameptr = InteropUtilities.ToUtf8PtrFromString(name);
+            }
+            if (layout != null)
+            {
+                layoutptr = InteropUtilities.ToUtf8PtrFromString(layout);
+            }
+
+            return Marshal.PtrToStringUTF8((IntPtr)HBFunctions.hb_audio_name_generate_s(nameptr, layoutptr, mixdown, keep_name ? 1 : 0, behaviour));
         }
     }
 }

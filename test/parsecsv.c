@@ -1,6 +1,6 @@
 /* parsecsv.c
 
-   Copyright (c) 2003-2021 HandBrake Team
+   Copyright (c) 2003-2026 HandBrake Team
    This file is part of the HandBrake source code
    Homepage: <http://handbrake.fr/>.
    It may be used under the terms of the GNU General Public License v2.
@@ -56,6 +56,7 @@ hb_csv_file_t *hb_open_csv_file( const char *filepath )
     file = malloc( sizeof( hb_csv_file_t ) );
     if( file == NULL )
     {
+        fclose( fileref );
         return file;
     }
 
@@ -106,6 +107,11 @@ hb_csv_cell_t *hb_read_next_cell( hb_csv_file_t *file )
     index = 0;
     while( CSV_CHAR_EOF != (c = hb_parse_character( file ) ) )
     {
+        if( c == CSV_CHAR_ERROR )
+        {
+            file->eof = 1;
+            break;
+        }
         if( c == CSV_CHAR_ROWSEP )
         {
             file->curr_row++;

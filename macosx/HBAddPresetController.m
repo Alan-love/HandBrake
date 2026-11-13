@@ -11,7 +11,7 @@
 #import "HBAudioDefaultsController.h"
 #import "HBSubtitlesDefaultsController.h"
 
-@interface HBAddPresetController ()
+@interface HBAddPresetController () <HBAudioDefaultsControllerDelegate, HBSubtitlesDefaultsControllerDelegate>
 
 @property (nonatomic, unsafe_unretained) IBOutlet NSTextField *name;
 @property (nonatomic, unsafe_unretained) IBOutlet NSTextField *desc;
@@ -35,7 +35,7 @@
 
 @property (nonatomic) HBPictureResolutionLimitMode resolutionLimitMode;
 
-@property (nonatomic, readwrite, strong) NSWindowController *defaultsController;
+@property (nonatomic, readwrite, strong) NSWindow *defaultsWindow;
 
 
 @end
@@ -58,17 +58,24 @@
     return self;
 }
 
-- (void)windowDidLoad {
-    [super windowDidLoad];
-
-    // Build the categories menu, and select the first
+- (void)windowDidLoad
+{
+    // Build the categories menu, and select the last used or the first
     [self buildCategoriesMenu];
-    if ([self.categories selectItemWithTag:2] == NO)
+    if ([self.categories indexOfItemWithTag:2] == -1)
     {
-        HBPreset *category = [[HBPreset alloc] initWithCategoryName:@"My Presets" builtIn:NO];
+        HBPreset *category = [[HBPreset alloc] initWithCategoryName:NSLocalizedString(@"My Presets", @"Add preset window -> My Presets") builtIn:NO];
         [self.manager addPreset:category];
         NSMenuItem *item = [self buildMenuItemWithCategory:category];
         [self.categories.menu insertItem:item atIndex:2];
+    }
+    NSString *lastUsedCategory = [NSUserDefaults.standardUserDefaults stringForKey:@"HBLastUsedCategory"];
+    if (lastUsedCategory)
+    {
+        [self.categories selectItemWithTitle:lastUsedCategory];
+    }
+    if (self.categories.selectedItem.tag != 2)
+    {
         [self.categories selectItemWithTag:2];
     }
     self.selectedCategory = self.categories.selectedItem.representedObject;
@@ -109,6 +116,8 @@
     [self.picWidth setIntValue:self.width];
     [self.picHeight setIntValue:self.height];
     [self addPresetPicDropdownChanged:nil];
+
+    self.window.preventsApplicationTerminationWhenModal = NO;
 }
 
 /**
@@ -167,33 +176,39 @@
 - (IBAction)showAudioSettingsSheet:(id)sender
 {
     HBAudioDefaults *defaults = [[HBAudioDefaults alloc] init];
-    [defaults applyPreset:self.mutablePreset];
+    [defaults applyPreset:self.mutablePreset error:NULL];
 
-    self.defaultsController = [[HBAudioDefaultsController alloc] initWithSettings:defaults];
+    self.defaultsWindow = [NSWindow windowWithContentViewController:[[HBAudioDefaultsController alloc] initWithSettings:defaults delegate:self]];
+    [self.window beginSheet:self.defaultsWindow completionHandler:^(NSModalResponse returnCode) {}];
+}
 
-    [self.window beginSheet:self.defaultsController.window completionHandler:^(NSModalResponse returnCode) {
-        if (returnCode == NSModalResponseOK)
-        {
-            [defaults writeToPreset:self.mutablePreset];
-        }
-        self.defaultsController = nil;
-    }];
+- (void)audioControllerDidEnd:(nonnull HBAudioDefaults *)settings returnCode:(NSModalResponse)returnCode
+{
+    if (returnCode == NSModalResponseOK)
+    {
+        [settings writeToPreset:self.mutablePreset];
+    }
+    [self.window endSheet:self.defaultsWindow];
+    self.defaultsWindow = nil;
 }
 
 - (IBAction)showSubtitlesSettingsSheet:(id)sender
 {
     HBSubtitlesDefaults *defaults = [[HBSubtitlesDefaults alloc] init];
-    [defaults applyPreset:self.mutablePreset];
+    [defaults applyPreset:self.mutablePreset error:NULL];
 
-    self.defaultsController = [[HBSubtitlesDefaultsController alloc] initWithSettings:defaults];
+    self.defaultsWindow = [NSWindow windowWithContentViewController:[[HBSubtitlesDefaultsController alloc] initWithSettings:defaults delegate:self]];
+    [self.window beginSheet:self.defaultsWindow completionHandler:^(NSModalResponse returnCode) {}];
+}
 
-    [self.window beginSheet:self.defaultsController.window completionHandler:^(NSModalResponse returnCode) {
-        if (returnCode == NSModalResponseOK)
-        {
-            [defaults writeToPreset:self.mutablePreset];
-        }
-        self.defaultsController = nil;
-    }];
+- (void)subtitlesControllerDidEnd:(nonnull HBSubtitlesDefaults *)settings returnCode:(NSModalResponse)returnCode
+{
+    if (returnCode == NSModalResponseOK)
+    {
+        [settings writeToPreset:self.mutablePreset];
+    }
+    [self.window endSheet:self.defaultsWindow];
+    self.defaultsWindow = nil;
 }
 
 - (IBAction)add:(id)sender
@@ -260,6 +275,7 @@
         self.preset = [newPreset copy];
         [self.selectedCategory insertObject:self.preset inChildrenAtIndex:self.selectedCategory.countOfChildren];
 
+        [NSUserDefaults.standardUserDefaults setObject:self.categories.selectedItem.title forKey:@"HBLastUsedCategory"];
         [self.window.sheetParent endSheet:self.window returnCode:NSModalResponseOK];
     }
 }
@@ -271,7 +287,7 @@
 
 - (IBAction)openUserGuide:(id)sender
 {
-    [[NSWorkspace sharedWorkspace] openURL:[HBUtilities.documentationURL URLByAppendingPathComponent:@"advanced/custom-presets.html"]];
+    [[NSWorkspace sharedWorkspace] openURL:[HBUtilities.documentationBaseURL URLByAppendingPathComponent:@"advanced/custom-presets.html"]];
 }
 
 @end

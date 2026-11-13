@@ -7,10 +7,11 @@
 #import "HBController.h"
 #import "HBAppDelegate.h"
 #import "HBFocusRingView.h"
-#import "HBToolbarBadgedItem.h"
+#import "HBControllerToolbarDelegate.h"
 #import "HBQueueController.h"
 #import "HBTitleSelectionController.h"
 #import "NSWindow+HBAdditions.h"
+#import "NSToolbar+HBAdditions.h"
 
 #import "HBQueue.h"
 #import "HBQueueWorker.h"
@@ -41,13 +42,20 @@
 static void *HBControllerScanCoreContext = &HBControllerScanCoreContext;
 static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
 
-@interface HBController () <HBPresetsViewControllerDelegate, HBTitleSelectionDelegate, NSMenuItemValidation, NSDraggingDestination, NSPopoverDelegate>
+@interface HBController () <HBPresetsViewControllerDelegate, HBTitleSelectionDelegate, NSMenuItemValidation, NSDraggingDestination, NSPopoverDelegate, NSPathControlDelegate>
 
 @property (nonatomic, readonly, strong) HBCore *core;
 @property (nonatomic, readonly, strong) HBAppDelegate *delegate;
 
+@property (nonatomic, strong) NSArray<HBSecurityAccessToken *> *fileTokens;
+@property (nonatomic, strong) NSArray<NSURL *> *subsURLs;
+@property (nonatomic, strong) NSURL *destinationFolderURL;
+@property (nonatomic, strong) HBSecurityAccessToken *destinationFolderToken;
+
+
 @property (nonatomic, weak) IBOutlet NSTextField *sourceLabel;
 @property (nonatomic, weak) IBOutlet NSPopUpButton *titlePopUp;
+@property (nonatomic, weak) IBOutlet NSPathControl *destinationPathControl;
 
 @property (nonatomic, strong) IBOutlet NSLayoutConstraint *bottomConstrain;
 @property (nonatomic, readwrite) NSColor *labelColor;
@@ -104,8 +112,6 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
 
 #pragma mark - Job
 
-@property (nonatomic, strong) NSURL *destinationURL;
-
 @property (nonatomic, nullable) HBJob *job;
 @property (nonatomic, nullable) HBAutoNamer *autoNamer;
 
@@ -121,12 +127,7 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
 
 #pragma mark - Toolbar
 
-@property (nonatomic) IBOutlet NSToolbarItem *openSourceToolbarItem;
-@property (nonatomic) IBOutlet NSToolbarItem *ripToolbarItem;
-@property (nonatomic) IBOutlet NSToolbarItem *pauseToolbarItem;
-@property (nonatomic) IBOutlet NSToolbarItem *presetsItem;
-
-@property (nonatomic, weak) IBOutlet HBToolbarBadgedItem *showQueueToolbarItem;
+@property (nonatomic) HBControllerToolbarDelegate *toolbarDelegate;
 
 @end
 
@@ -166,18 +167,18 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
         NSData *bookmark = [NSUserDefaults.standardUserDefaults objectForKey:HBLastDestinationDirectoryBookmark];
         if (bookmark)
         {
-            _destinationURL = [HBUtilities URLFromBookmark:bookmark];
+            _destinationFolderURL = [HBUtilities URLFromBookmark:bookmark];
         }
 #else
-        _destinationURL = [NSUserDefaults.standardUserDefaults URLForKey:HBLastDestinationDirectoryURL];
+        _destinationFolderURL = [NSUserDefaults.standardUserDefaults URLForKey:HBLastDestinationDirectoryURL];
 #endif
-        if (!_destinationURL || [NSFileManager.defaultManager fileExistsAtPath:_destinationURL.path isDirectory:nil] == NO)
+        if (!_destinationFolderURL || [_destinationFolderURL checkResourceIsReachableAndReturnError:NULL] == NO)
         {
-            _destinationURL = HBUtilities.defaultDestinationURL;
+            _destinationFolderURL = HBUtilities.defaultDestinationFolderURL;
         }
 
 #ifdef __SANDBOX_ENABLED__
-        [_destinationURL startAccessingSecurityScopedResource];
+        _destinationFolderToken = [HBSecurityAccessToken tokenWithObject:_destinationFolderURL];
 #endif
     }
 
@@ -186,17 +187,21 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
 
 - (void)windowDidLoad
 {
-    if (@available (macOS 10.12, *))
-    {
-        self.window.tabbingMode = NSWindowTabbingModeDisallowed;
-    }
+    self.window.tabbingMode = NSWindowTabbingModeDisallowed;
 
-#if defined(__MAC_11_0)
     if (@available (macOS 11, *))
     {
         self.window.toolbarStyle = NSWindowToolbarStyleExpanded;
     }
-#endif
+
+    self.toolbarDelegate = [[HBControllerToolbarDelegate alloc] initWithTarget:self];
+
+    NSToolbar *toolbar = [[NSToolbar alloc] initWithIdentifier:@"HBMainWindowToolbar2"];
+    toolbar.delegate = self.toolbarDelegate;
+    toolbar.allowsUserCustomization = YES;
+    toolbar.autosavesConfiguration = YES;
+    toolbar.displayMode = NSToolbarDisplayModeIconAndLabel;
+    self.window.toolbar = toolbar;
 
     [self enableUI:NO];
 
@@ -206,8 +211,8 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
     [self updateProgress];
 
     // Register HBController's Window as a receiver for files/folders drag & drop operations
-    [self.window registerForDraggedTypes:@[(NSString *)kUTTypeFileURL]];
-    [self.mainTabView registerForDraggedTypes:@[(NSString *)kUTTypeFileURL]];
+    [self.window registerForDraggedTypes:@[NSPasteboardTypeFileURL]];
+    [self.mainTabView registerForDraggedTypes:@[NSPasteboardTypeFileURL]];
 
     _presetView = [[HBPresetsViewController alloc] initWithPresetManager:self.presetManager];
     _presetView.delegate = self;
@@ -278,9 +283,7 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
 
     [NSNotificationCenter.defaultCenter addObserverForName:HBQueueDidChangeStateNotification
                                                     object:_queue queue:NSOperationQueue.mainQueue
-                                                usingBlock:^(NSNotification * _Nonnull note) {
-        [self updateQueueUI];
-    }];
+                                                usingBlock:^(NSNotification * _Nonnull note) { [self updateQueueUI]; }];
 
     [self updateQueueUI];
 
@@ -323,12 +326,21 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
 - (BOOL)performDragOperation:(id <NSDraggingInfo>)sender
 {
     NSArray<NSURL *> *fileURLs = [self fileURLsFromPasteboard:[sender draggingPasteboard]];
-
     if (fileURLs.count)
     {
-        [self openURL:fileURLs.firstObject];
+        NSArray<NSURL *> *subtitlesFileURLs = [HBUtilities extractURLs:fileURLs withExtension:HBUtilities.supportedExtensions];
+        if (subtitlesFileURLs.count == fileURLs.count && self.job)
+        {
+            [self.subtitlesViewController addTracksFromExternalFiles:fileURLs];
+            NSUInteger index = [self.mainTabView indexOfTabViewItem:self.subtitlesTab];
+            [self.mainTabView selectTabViewItemAtIndex:index];
+        }
+        else
+        {
+            BOOL recursive = [NSUserDefaults.standardUserDefaults boolForKey:HBRecursiveScan];
+            [self openURLs:fileURLs recursive:recursive];
+        }
     }
-
     [self.window.contentView setShowFocusRing:NO];
     return YES;
 }
@@ -345,12 +357,9 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
     if (context == HBControllerScanCoreContext)
     {
         HBState state = [change[NSKeyValueChangeNewKey] intValue];
-        [self updateToolbarButtonsStateForScanCore:state];
-        if (@available(macOS 10.12.2, *))
-        {
-            [self _touchBar_updateButtonsStateForScanCore:state];
-            [self _touchBar_validateUserInterfaceItems];
-        }
+        [self.toolbarDelegate updateToolbarButtonsStateForScanCore:state toolbar:self.window.toolbar];
+        [self _touchBar_updateButtonsStateForScanCore:state];
+        [self _touchBar_validateUserInterfaceItems];
     }
     else if (context == HBControllerLogLevelContext)
     {
@@ -364,62 +373,14 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
 
 - (void)updateQueueUI
 {
-    [self updateToolbarButtonsState];
+    [self.toolbarDelegate updateToolbarButtonsState:self.queue toolbar:self.window.toolbar];
     [self.window.toolbar validateVisibleItems];
 
-    if (@available(macOS 10.12.2, *))
-    {
-        [self _touchBar_updateQueueButtonsState];
-        [self _touchBar_validateUserInterfaceItems];
-    }
+    [self _touchBar_updateQueueButtonsState];
+    [self _touchBar_validateUserInterfaceItems];
 
     NSUInteger count = self.queue.pendingItemsCount;
-    self.showQueueToolbarItem.badgeValue = count ? @(count).stringValue : @"";
-}
-
-- (void)updateToolbarButtonsStateForScanCore:(HBState)state
-{
-    if (state == HBStateIdle)
-    {
-        _openSourceToolbarItem.image = [NSImage imageNamed: @"source"];
-        _openSourceToolbarItem.label = NSLocalizedString(@"Open Source",  @"Toolbar Open/Cancel Item");
-        _openSourceToolbarItem.toolTip = NSLocalizedString(@"Open Source", @"Toolbar Open/Cancel Item");
-    }
-    else
-    {
-        _openSourceToolbarItem.image = [NSImage imageNamed: @"stopencode"];
-        _openSourceToolbarItem.label = NSLocalizedString(@"Cancel Scan", @"Toolbar Open/Cancel Item");
-        _openSourceToolbarItem.toolTip = NSLocalizedString(@"Cancel Scanning Source", @"Toolbar Open/Cancel Item");
-    }
-}
-
-- (void)updateToolbarButtonsState
-{
-    if (self.queue.canResume)
-    {
-        _pauseToolbarItem.image = [NSImage imageNamed: @"encode"];
-        _pauseToolbarItem.label = NSLocalizedString(@"Resume", @"Toolbar Pause Item");
-        _pauseToolbarItem.toolTip = NSLocalizedString(@"Resume Encoding", @"Toolbar Pause Item");
-    }
-    else
-    {
-        _pauseToolbarItem.image = [NSImage imageNamed:@"pauseencode"];
-        _pauseToolbarItem.label = NSLocalizedString(@"Pause", @"Toolbar Pause Item");
-        _pauseToolbarItem.toolTip = NSLocalizedString(@"Pause Encoding", @"Toolbar Pause Item");
-
-    }
-    if (self.queue.isEncoding)
-    {
-        _ripToolbarItem.image = [NSImage imageNamed:@"stopencode"];
-        _ripToolbarItem.label = NSLocalizedString(@"Stop", @"Toolbar Start/Stop Item");
-        _ripToolbarItem.toolTip = NSLocalizedString(@"Stop Encoding", @"Toolbar Start/Stop Item");
-    }
-    else
-    {
-        _ripToolbarItem.image = [NSImage imageNamed: @"encode"];
-        _ripToolbarItem.label = _queue.pendingItemsCount > 0 ? NSLocalizedString(@"Start Queue", @"Toolbar Start/Stop Item") :  NSLocalizedString(@"Start", @"Toolbar Start/Stop Item");
-        _ripToolbarItem.toolTip = NSLocalizedString(@"Start Encoding", @"Toolbar Start/Stop Item");
-    }
+    [self.toolbarDelegate updateToolbarQueueBadge:count ? @(count).stringValue : @"" toolbar:self.window.toolbar];
 }
 
 - (void)enableUI:(BOOL)enabled
@@ -516,7 +477,7 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
         }
     }
 
-    self.statusField.stringValue = [NSString stringWithFormat:NSLocalizedString(@"Encoding Job: %@", @""), firstWorkingItem.outputFileName];
+    self.statusField.stringValue = [NSString stringWithFormat:NSLocalizedString(@"Encoding Job: %@", @""), firstWorkingItem.destinationFileName];
 }
 
 - (void)removeQueueObservers
@@ -560,7 +521,8 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
         }
     }
 
-    if (action == @selector(togglePauseResume:)) {
+    if (action == @selector(togglePauseResume:))
+    {
         return self.queue.canPause || self.queue.canResume;
     }
 
@@ -581,8 +543,12 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
 {
     SEL action = menuItem.action;
 
-    if (action == @selector(addToQueue:) || action == @selector(addAllTitlesToQueue:) ||
-        action == @selector(addTitlesToQueue:) || action == @selector(showAddPresetPanel:))
+    if (action == @selector(addToQueue:) ||
+        action == @selector(addAllTitlesToQueue:) ||
+        action == @selector(addTitlesToQueue:) ||
+        action == @selector(showAddPresetPanel:) ||
+        action == @selector(revealDestinationItemsInFinder:) ||
+        action == @selector(revealSourceItemsInFinder:))
     {
         return self.job && self.window.attachedSheet == nil;
     }
@@ -686,25 +652,18 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
 /**
  * Here we actually tell hb_scan to perform the source scan, using the path to source and title number
  */
-- (void)scanURL:(NSURL *)fileURL titleIndex:(NSUInteger)index completionHandler:(void(^)(NSArray<HBTitle *> *titles))completionHandler
+- (void)scanURLs:(NSArray<NSURL *> *)fileURLs titleIndex:(NSUInteger)index keepDuplicateTitles:(BOOL)keepDuplicateTitles completionHandler:(void(^)(NSArray<HBTitle *> *titles))completionHandler
 {
-    // Save the current settings
-    [self updateCurrentPreset];
-
-    self.job = nil;
-    [self.titlePopUp removeAllItems];
-    self.window.representedURL = nil;
-    self.window.title = NSLocalizedString(@"HandBrake", @"Main Window -> title");
-
-    // Clear the undo manager, we can't undo this action
-    [self.window.undoManager removeAllActions];
-
-    NSURL *mediaURL = [HBUtilities mediaURLFromURL:fileURL];
-
-    NSError *outError = NULL;
+    [self showWindow:self];
 
     // Check if we can scan the source and if there is any warning.
-    BOOL canScan = [self.core canScan:mediaURL error:&outError];
+    NSError *outError = NULL;
+    BOOL canScan = YES;
+
+    if (fileURLs.count == 1)
+    {
+        canScan = [self.core canScan:fileURLs error:&outError];
+    }
 
     // Notify the user that we don't support removal of copy protection.
     if (canScan && outError.code == 101 && !self.suppressCopyProtectionWarning)
@@ -725,13 +684,21 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
 
     if (canScan)
     {
-        NSUInteger hb_num_previews = [NSUserDefaults.standardUserDefaults integerForKey:HBPreviewsNumber];
-        NSUInteger min_title_duration_seconds = [NSUserDefaults.standardUserDefaults integerForKey:HBMinTitleScanSeconds];
+        NSUInteger previewsCount = [NSUserDefaults.standardUserDefaults integerForKey:HBPreviewsNumber];
+        NSUInteger minTitleDuration = [NSUserDefaults.standardUserDefaults boolForKey:HBMinTitleScan] ?
+                                       [NSUserDefaults.standardUserDefaults integerForKey:HBMinTitleScanSeconds] : 0;
+        NSUInteger maxTitleDuration = [NSUserDefaults.standardUserDefaults boolForKey:HBMaxTitleScan] ?
+                                       [NSUserDefaults.standardUserDefaults integerForKey:HBMaxTitleScanSeconds] : 0;
 
-        [self.core scanURL:mediaURL
-                titleIndex:index
-                  previews:hb_num_previews minDuration:min_title_duration_seconds keepPreviews:YES
-           progressHandler:^(HBState state, HBProgress progress, NSString *info)
+        [self.core scanURLs:fileURLs
+                 titleIndex:index
+                   previews:previewsCount
+                minDuration:minTitleDuration
+                maxDuration:maxTitleDuration
+               keepPreviews:YES
+            hardwareDecoder:[NSUserDefaults.standardUserDefaults boolForKey:HBUseHardwareDecoder]
+            keepDuplicateTitles:keepDuplicateTitles
+            progressHandler:^(HBState state, HBProgress progress, NSString *info)
          {
              self.sourceLabel.stringValue = info;
              self.scanIndicator.hidden = NO;
@@ -745,14 +712,12 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
              self.scanIndicator.indeterminate = NO;
              self.scanIndicator.doubleValue = 0.0;
 
-             if (result == HBCoreResultDone)
+             if (result.code == HBCoreResultCodeDone)
              {
                  for (HBTitle *title in self.core.titles)
                  {
                      [self.titlePopUp addItemWithTitle:title.description];
                  }
-                 self.window.representedURL = mediaURL;
-                 self.window.title = mediaURL.lastPathComponent;
              }
              else
              {
@@ -760,27 +725,14 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
                  self.sourceLabel.stringValue = NSLocalizedString(@"No Valid Source Found", @"Main Window -> Info text");
              }
 
-             // Set the last searched source directory in the prefs here
-             if ([NSWorkspace.sharedWorkspace isFilePackageAtPath:mediaURL.URLByDeletingLastPathComponent.path])
-             {
-                 [NSUserDefaults.standardUserDefaults setURL:mediaURL.URLByDeletingLastPathComponent.URLByDeletingLastPathComponent forKey:HBLastSourceDirectoryURL];
-             }
-             else
-             {
-                 [NSUserDefaults.standardUserDefaults setURL:mediaURL.URLByDeletingLastPathComponent forKey:HBLastSourceDirectoryURL];
-             }
-
              completionHandler(self.core.titles);
 
-             // Clear the undo manager, the completion handle
+             // Clear the undo manager, the completion handler
              // set the job in the main window
-             // and don't want to make it undoable
+             // and we don't want to make it undoable
              [self.window.undoManager removeAllActions];
              [self.window.toolbar validateVisibleItems];
-             if (@available(macOS 10.12.2, *))
-             {
-                 [self _touchBar_validateUserInterfaceItems];
-             }
+             [self _touchBar_validateUserInterfaceItems];
          }];
     }
     else
@@ -789,15 +741,116 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
     }
 }
 
-- (void)openURL:(NSURL *)fileURL titleIndex:(NSUInteger)index
+- (void)showOpenPanelForDestination:(NSURL *)destinationURL
 {
-    [self showWindow:self];
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.canChooseFiles = NO;
+    panel.canChooseDirectories = YES;
+    panel.directoryURL = destinationURL;
+    panel.message = NSLocalizedString(@"HandBrake does not have permission to write to this folder. To allow HandBrake to write to this folder, click \"Allow\"", @"Main Window -> Same as source destination open panel");
+    panel.prompt = NSLocalizedString(@"Allow", @"Main Window -> Same as source destination open panel");
 
-    [self scanURL:fileURL titleIndex:index completionHandler:^(NSArray<HBTitle *> *titles)
+    [panel beginSheetModalForWindow:self.window completionHandler:^(NSInteger result)
+     {
+         if (result == NSModalResponseOK)
+         {
+             self.destinationFolderURL = panel.URL;
+             self.destinationFolderToken = [HBSecurityAccessToken tokenWithAlreadyAccessedObject:panel.URL];
+             if (self.job)
+             {
+                 [self.job setDestinationFolderURL:self.destinationFolderURL sameAsSource:YES];
+                 [self.window.undoManager removeAllActions];
+             }
+         }
+     }];
+}
+
+- (void)askForPermissionAndSetDestinationURLs:(NSArray<NSURL *> *)destinationURLs sourceURLs:(NSArray<NSURL *> *)sourceURLs
+{
+    if (destinationURLs.count == 0)
     {
+        return;
+    }
+
+    if (sourceURLs.count == 1)
+    {
+        // There is no need to ask for permission
+        // if the source is a already a folder
+        NSNumber *isDirectory = nil;
+        NSURL *sourceURL = sourceURLs.firstObject;
+        [sourceURL getResourceValue:&isDirectory forKey:NSURLIsDirectoryKey error:nil];
+
+        if (isDirectory.boolValue == YES)
+        {
+            self.destinationFolderURL = sourceURL;
+            self.destinationFolderToken = [HBSecurityAccessToken tokenWithObject:sourceURL];
+            [self.job setDestinationFolderURL:sourceURL sameAsSource:YES];
+            return;
+        }
+    }
+
+    if (![self.destinationFolderURL isEqualTo:destinationURLs.firstObject])
+    {
+#ifdef __SANDBOX_ENABLED__
+        [self showOpenPanelForDestination:destinationURLs.firstObject];
+#else
+        [self.job setDestinationFolderURL:destinationURLs.firstObject sameAsSource:YES];
+#endif
+    }
+}
+
+- (void)cleanUp
+{
+    self.job = nil;
+    self.fileTokens = nil;
+    self.subsURLs = nil;
+
+    [self.titlePopUp removeAllItems];
+    self.window.representedURL = nil;
+    self.window.title = NSLocalizedString(@"HandBrake", @"Main Window -> title");
+
+    // Clear the undo manager, we can't undo this action
+    [self.window.undoManager removeAllActions];
+}
+
+- (void)openURLs:(NSArray<NSURL *> *)fileURLs recursive:(BOOL)recursive titleIndex:(NSUInteger)index
+{
+    // Save the current settings
+    [self updateCurrentPreset];
+    [self cleanUp];
+
+    NSMutableArray<HBSecurityAccessToken *> *tokens = [[NSMutableArray alloc] init];
+    for (NSURL *fileURL in fileURLs)
+    {
+        [tokens addObject:[HBSecurityAccessToken tokenWithAlreadyAccessedObject:fileURL]];
+    }
+    self.fileTokens = tokens;
+
+    NSMutableArray<NSString *> *excludedExtensions = [[NSMutableArray alloc] init];
+    for (NSString *extension in [NSUserDefaults.standardUserDefaults arrayForKey:HBExcludedFileExtensions])
+    {
+        // Make sure there are only NSString instances in the array
+        // Third parties can write to user defaults too and add different kind of objects.
+        if ([extension isKindOfClass:[NSString class]])
+        {
+            [excludedExtensions addObject:extension];
+        }
+    }
+
+    NSArray<NSURL *> *expandedFileURLs  = [HBUtilities expandURLs:fileURLs recursive:recursive];
+    NSArray<NSURL *> *subtitlesFileURLs = [HBUtilities extractURLs:expandedFileURLs withExtension:HBUtilities.supportedExtensions];
+    NSArray<NSURL *> *trimmedFileURLs   = [HBUtilities trimURLs:expandedFileURLs withExtension:excludedExtensions];
+
+    [self scanURLs:trimmedFileURLs titleIndex:index keepDuplicateTitles:[NSUserDefaults.standardUserDefaults boolForKey:HBKeepDuplicateTitles] completionHandler:^(NSArray<HBTitle *> *titles)
+    {
+        NSArray<NSURL *> *baseURLs = [HBUtilities baseURLs:trimmedFileURLs];
+
         if (titles.count)
         {
-            [[NSDocumentController sharedDocumentController] noteNewRecentDocumentURL:fileURL];
+            for (NSURL *fileURL in fileURLs)
+            {
+                [NSDocumentController.sharedDocumentController noteNewRecentDocumentURL:fileURL];
+            }
 
             HBTitle *featuredTitle = titles.firstObject;
             for (HBTitle *title in titles)
@@ -808,17 +861,34 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
                 }
             }
 
+            self.subsURLs = subtitlesFileURLs;
+
             HBJob *job = [self jobFromTitle:featuredTitle];
-            self.job = job;
+            if (job)
+            {
+                self.job = job;
+                if (featuredTitle.isStream && [NSUserDefaults.standardUserDefaults boolForKey:HBUseSourceFolderDestination])
+                {
+                    [self askForPermissionAndSetDestinationURLs:baseURLs sourceURLs:fileURLs];
+                }
+            }
+            else
+            {
+                [self cleanUp];
+                self.sourceLabel.stringValue = NSLocalizedString(@"No Valid Preset", @"Main Window -> Info text");
+            }
         }
+
+        // Set the last searched source directory in the prefs here
+        [NSUserDefaults.standardUserDefaults setURL:baseURLs.firstObject forKey:HBLastSourceDirectoryURL];
     }];
 }
 
-- (void)openURL:(NSURL *)fileURL
+- (void)openURLs:(NSArray<NSURL *> *)fileURLs recursive:(BOOL)recursive
 {
     if (self.core.state != HBStateScanning)
     {
-        [self openURL:fileURL titleIndex:0];
+        [self openURLs:fileURLs recursive:recursive titleIndex:0];
     }
 }
 
@@ -829,25 +899,24 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
 {
     if (self.core.state != HBStateScanning)
     {
+        [self cleanUp];
         [job refreshSecurityScopedResources];
-        [self scanURL:job.fileURL titleIndex:job.titleIdx completionHandler:^(NSArray<HBTitle *> *titles)
+        self.fileTokens = @[[HBSecurityAccessToken tokenWithObject:job.fileURL]];
+
+        [self scanURLs:@[job.fileURL] titleIndex:job.titleIdx keepDuplicateTitles:job.keepDuplicateTitles completionHandler:^(NSArray<HBTitle *> *titles)
         {
             if (titles.count)
             {
-                // If the scan was cached, reselect
-                // the original title
+                // Match the title index if the scan returned a cached result
                 for (HBTitle *title in titles)
                 {
                     if (title.index == job.titleIdx)
                     {
                         job.title = title;
-                        break;
                     }
                 }
 
-                // Else just one title or a title specific rescan
-                // select the first title
-                if (!job.title)
+                if (job.title == nil)
                 {
                     job.title = titles.firstObject;
                 }
@@ -863,6 +932,7 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
             else
             {
                 handler(NO);
+                [self cleanUp];
             }
         }];
     }
@@ -872,27 +942,50 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
     }
 }
 
-- (HBJob *)jobFromTitle:(HBTitle *)title
+- (NSArray<NSURL *> *)matchSubtitlesURLsWith:(NSURL *)sourceURL
 {
-    // If there is already a title load, save the current settings to a preset
-    // Save the current settings
+    NSMutableArray<NSURL *> *URLs = [[NSMutableArray alloc] init];
+    NSString *sourcePrefix = [sourceURL.path stringByDeletingPathExtension];
+
+    for (NSURL *url in self.subsURLs)
+    {
+        if ([url.path hasPrefix:sourcePrefix])
+        {
+            [URLs addObject:url];
+        }
+    }
+
+    return URLs;
+}
+
+- (nullable HBJob *)jobFromTitle:(HBTitle *)title
+{
+    // If there is already a title loaded, save the current settings to a preset
     [self updateCurrentPreset];
 
-    HBJob *job = [[HBJob alloc] initWithTitle:title andPreset:self.currentPreset];
-    job.outputURL = self.destinationURL;
+    NSArray<NSURL *> *subtitlesURLs = [self matchSubtitlesURLsWith:title.url];
+    HBJob *job = [[HBJob alloc] initWithTitle:title preset:self.currentPreset subtitles:subtitlesURLs];
 
-    // If the source is not a stream, and autonaming is disabled,
-    // keep the existing file name.
-    if (self.job.outputFileName.length == 0 || title.isStream || [NSUserDefaults.standardUserDefaults boolForKey:HBDefaultAutoNaming])
+    if (job)
     {
-        job.outputFileName = job.defaultName;
-    }
-    else
-    {
-        job.outputFileName = self.job.outputFileName;
-    }
+        [job setDestinationFolderURL:self.destinationFolderURL
+                        sameAsSource:[NSUserDefaults.standardUserDefaults boolForKey:HBUseSourceFolderDestination]];
 
-    job.undo = self.window.undoManager;
+        job.range.type = [NSUserDefaults.standardUserDefaults integerForKey:HBDefaultRangeType];
+
+        // If the source is not a stream, and autonaming is disabled,
+        // keep the existing file name.
+        if (self.job.destinationFileName.length == 0 || title.isStream || [NSUserDefaults.standardUserDefaults boolForKey:HBDefaultAutoNaming])
+        {
+            job.destinationFileName = job.defaultName;
+        }
+        else
+        {
+            job.destinationFileName = self.job.destinationFileName;
+        }
+
+        job.undo = self.window.undoManager;
+    }
 
     return job;
 }
@@ -969,6 +1062,9 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
         {
             self.sourceLabel.stringValue = [NSString stringWithFormat:@"%@, %@", title.name, title.shortFormatDescription];
         }
+
+        self.window.representedURL = job.fileURL;
+        self.window.title = job.fileURL.lastPathComponent;
     }
     else
     {
@@ -994,7 +1090,7 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
     }
 
     NSOpenPanel *panel = [NSOpenPanel openPanel];
-    [panel setAllowsMultipleSelection:NO];
+    [panel setAllowsMultipleSelection:YES];
     [panel setCanChooseFiles:YES];
     [panel setCanChooseDirectories:YES];
 
@@ -1017,13 +1113,26 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
     {
         if (result == NSModalResponseOK)
          {
+             BOOL recursive = [NSUserDefaults.standardUserDefaults boolForKey:HBRecursiveScan];
              NSInteger titleIdx = self.scanSpecificTitle ? self.scanSpecificTitleIdx : 0;
-             [self openURL:panel.URL titleIndex:titleIdx];
+             [self openURLs:panel.URLs recursive:recursive titleIndex:titleIdx];
          }
      }];
 }
 
 #pragma mark - GUI Controls Changed Methods
+
+- (void)setDestinationFolderURL:(NSURL *)destinationFolderURL
+{
+    self.job.destinationFolderURL = destinationFolderURL;
+    _destinationFolderURL = destinationFolderURL;
+
+    // Save this path to the prefs so that on next browse destination window it opens there
+    [NSUserDefaults.standardUserDefaults setObject:[HBUtilities bookmarkFromURL:destinationFolderURL]
+                                              forKey:HBLastDestinationDirectoryBookmark];
+    [NSUserDefaults.standardUserDefaults setURL:destinationFolderURL
+                                         forKey:HBLastDestinationDirectoryURL];
+}
 
 - (IBAction)browseDestination:(id)sender
 {
@@ -1034,33 +1143,73 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
     panel.canCreateDirectories = YES;
     panel.prompt = NSLocalizedString(@"Choose", @"Main Window -> Destination open panel");
 
-    if (self.job.outputURL)
+    if (self.job.destinationFolderURL)
     {
-        panel.directoryURL = self.job.outputURL;
+        panel.directoryURL = self.job.destinationFolderURL;
     }
 
     [panel beginSheetModalForWindow:self.window completionHandler:^(NSInteger result)
      {
          if (result == NSModalResponseOK)
          {
-             self.job.outputURL = panel.URL;
-             self.destinationURL = panel.URL;
-
-             // Save this path to the prefs so that on next browse destination window it opens there
-             [NSUserDefaults.standardUserDefaults setObject:[HBUtilities bookmarkFromURL:panel.URL]
-                                                       forKey:HBLastDestinationDirectoryBookmark];
-             [NSUserDefaults.standardUserDefaults setURL:panel.URL
-                                                  forKey:HBLastDestinationDirectoryURL];
-
+             self.destinationFolderURL = panel.URL;
+             self.destinationFolderToken = [HBSecurityAccessToken tokenWithAlreadyAccessedObject:panel.URL];
          }
      }];
+}
+
+- (NSDragOperation)pathControl:(NSPathControl *)pathControl validateDrop:(id <NSDraggingInfo>)info
+{
+    NSPasteboard *pboard = info.draggingPasteboard;
+
+    if ([pboard availableTypeFromArray:@[NSPasteboardTypeFileURL]])
+    {
+        NSURL *URL = [[pboard readObjectsForClasses:@[[NSURL class]] options:nil] firstObject];
+        if (URL.hasDirectoryPath)
+        {
+            return NSDragOperationGeneric;
+        }
+    }
+
+    return NSDragOperationNone;
+}
+
+- (BOOL)pathControl:(NSPathControl *)pathControl acceptDrop:(id <NSDraggingInfo>)info
+{
+    NSPasteboard *pboard = info.draggingPasteboard;
+
+    if ([pboard availableTypeFromArray:@[NSPasteboardTypeFileURL]])
+    {
+        NSURL *URL = [[pboard readObjectsForClasses:@[[NSURL class]] options:nil] firstObject];
+        if (URL.hasDirectoryPath)
+        {
+            self.destinationFolderURL = URL;
+            self.destinationFolderToken = [HBSecurityAccessToken tokenWithAlreadyAccessedObject:URL];
+        }
+        return YES;
+    }
+
+    return NO;
+}
+
+- (IBAction)revealPathItemInFinder:(id)sender
+{
+    NSURL *URL = self.destinationPathControl.clickedPathItem.URL;
+    if (URL == nil)
+    {
+        URL = self.destinationFolderURL;
+    }
+    [NSWorkspace.sharedWorkspace activateFileViewerSelectingURLs:@[URL]];
 }
 
 - (IBAction)titlePopUpChanged:(NSPopUpButton *)sender
 {
     HBTitle *title = self.core.titles[sender.indexOfSelectedItem];
     HBJob *job = [self jobFromTitle:title];
-    self.job = job;
+    if (job)
+    {
+        self.job = job;
+    }
 }
 
 - (void)formatChanged:(NSNotification *)notification
@@ -1099,7 +1248,10 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
         {
             HBTitle *title = titles[index + 1];
             HBJob *job = [self jobFromTitle:title];
-            self.job = job;
+            if (job)
+            {
+                self.job = job;
+            }
         }
     }
 }
@@ -1114,8 +1266,27 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
         {
             HBTitle *title = titles[index - 1];
             HBJob *job = [self jobFromTitle:title];
-            self.job = job;
+            if (job)
+            {
+                self.job = job;
+            }
         }
+    }
+}
+
+- (IBAction)revealDestinationItemsInFinder:(id)sender
+{
+    if (self.job.destinationURL)
+    {
+        [NSWorkspace.sharedWorkspace activateFileViewerSelectingURLs:@[self.job.destinationFolderURL]];
+    }
+}
+
+- (IBAction)revealSourceItemsInFinder:(id)sender
+{
+    if (self.job.fileURL)
+    {
+        [NSWorkspace.sharedWorkspace activateFileViewerSelectingURLs:@[self.job.fileURL]];
     }
 }
 
@@ -1129,7 +1300,7 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
  */
 - (void)runDestinationAlerts:(HBJob *)job completionHandler:(void (^ __nullable)(NSModalResponse returnCode))handler
 {
-    if ([NSFileManager.defaultManager fileExistsAtPath:job.outputURL.path] == NO)
+    if ([job.destinationFolderURL checkResourceIsReachableAndReturnError:NULL] == NO)
     {
         NSAlert *alert = [[NSAlert alloc] init];
         [alert setMessageText:NSLocalizedString(@"Warning!", @"Invalid destination alert -> message")];
@@ -1137,8 +1308,8 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
         [alert setAlertStyle:NSAlertStyleCritical];
         [alert beginSheetModalForWindow:self.window completionHandler:handler];
     }
-    else if ([job.fileURL isEqual:job.completeOutputURL]||
-             [job.fileURL.absoluteString.lowercaseString isEqualToString:job.completeOutputURL.absoluteString.lowercaseString])
+    else if ([job.fileURL isEqual:job.destinationURL]||
+             [job.fileURL.absoluteString.lowercaseString isEqualToString:job.destinationURL.absoluteString.lowercaseString])
     {
         NSAlert *alert = [[NSAlert alloc] init];
         [alert setMessageText:NSLocalizedString(@"A file already exists at the selected destination.", @"Destination same as source alert -> message")];
@@ -1146,38 +1317,32 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
         [alert setAlertStyle:NSAlertStyleCritical];
         [alert beginSheetModalForWindow:self.window completionHandler:handler];
     }
-    else if ([NSFileManager.defaultManager fileExistsAtPath:job.completeOutputURL.path])
+    else if ([job.destinationURL checkResourceIsReachableAndReturnError:NULL])
     {
         NSAlert *alert = [[NSAlert alloc] init];
         [alert setMessageText:NSLocalizedString(@"A file already exists at the selected destination.", @"File already exists alert -> message")];
-        [alert setInformativeText:[NSString stringWithFormat:NSLocalizedString(@"Do you want to overwrite %@?", @"File already exists alert -> informative text"), job.completeOutputURL.path]];
+        [alert setInformativeText:[NSString stringWithFormat:NSLocalizedString(@"Do you want to overwrite %@?", @"File already exists alert -> informative text"), job.destinationURL.path]];
         [alert addButtonWithTitle:NSLocalizedString(@"Cancel", @"File already exists alert -> first button")];
         [alert addButtonWithTitle:NSLocalizedString(@"Overwrite", @"File already exists alert -> second button")];
-#if defined(__MAC_11_0)
-    if (@available(macOS 11, *))
-    {
-        alert.buttons.lastObject.hasDestructiveAction = true;
-    }
-#endif
+        if (@available(macOS 11, *))
+        {
+            alert.buttons.lastObject.hasDestructiveAction = true;
+        }
         [alert setAlertStyle:NSAlertStyleCritical];
-
         [alert beginSheetModalForWindow:self.window completionHandler:handler];
     }
-    else if ([_queue itemExistAtURL:job.completeOutputURL])
+    else if ([_queue itemExistAtURL:job.destinationURL])
     {
         NSAlert *alert = [[NSAlert alloc] init];
         [alert setMessageText:NSLocalizedString(@"There is already a queue item for this destination.", @"File already exists in queue alert -> message")];
-        [alert setInformativeText:[NSString stringWithFormat:NSLocalizedString(@"Do you want to overwrite %@?", @"File already exists in queue alert -> informative text"), job.completeOutputURL.path]];
+        [alert setInformativeText:[NSString stringWithFormat:NSLocalizedString(@"Do you want to overwrite %@?", @"File already exists in queue alert -> informative text"), job.destinationURL.path]];
         [alert addButtonWithTitle:NSLocalizedString(@"Cancel", @"File already exists in queue alert -> first button")];
         [alert addButtonWithTitle:NSLocalizedString(@"Overwrite", @"File already exists in queue alert -> second button")];
-#if defined(__MAC_11_0)
-    if (@available(macOS 11, *))
-    {
-        alert.buttons.lastObject.hasDestructiveAction = true;
-    }
-#endif
+        if (@available(macOS 11, *))
+        {
+            alert.buttons.lastObject.hasDestructiveAction = true;
+        }
         [alert setAlertStyle:NSAlertStyleCritical];
-
         [alert beginSheetModalForWindow:self.window completionHandler:handler];
     }
     else
@@ -1266,45 +1431,53 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
     [self.window beginSheet:self.titlesSelectionController.window completionHandler:nil];
 }
 
-- (void)didSelectTitles:(NSArray<HBTitle *> *)titles
+- (void)didSelectTitles:(NSArray<HBTitle *> *)titles range:(nullable HBTitleSelectionRange *)range
 {
     [self.window endSheet:self.titlesSelectionController.window];
 
-    [self doAddTitlesToQueue:titles];
+    [self doAddTitlesToQueue:titles range:range];
 }
 
-- (void)doAddTitlesToQueue:(NSArray<HBTitle *> *)titles
+- (void)doAddTitlesToQueue:(NSArray<HBTitle *> *)titles range:(nullable HBTitleSelectionRange *)range
 {
     NSMutableArray<HBJob *> *jobs = [[NSMutableArray alloc] init];
     BOOL fileExists = NO;
     BOOL fileOverwritesSource = NO;
+    BOOL useSourceFolderDestination = [NSUserDefaults.standardUserDefaults boolForKey:HBUseSourceFolderDestination];
 
     // Get the preset from the loaded job.
     HBPreset *preset = [self createPresetFromCurrentSettings];
 
     for (HBTitle *title in titles)
     {
-        HBJob *job = [[HBJob alloc] initWithTitle:title andPreset:preset];
-        job.outputURL = self.destinationURL;
-        job.outputFileName = job.defaultName;
-        job.title = nil;
-        [jobs addObject:job];
+        HBJob *job = [[HBJob alloc] initWithTitle:title preset:preset];
+
+        if (job)
+        {
+            [job applySelectionRange:range];
+            [job setDestinationFolderURL:self.destinationFolderURL
+                            sameAsSource:useSourceFolderDestination];
+            job.destinationFileName = job.defaultName;
+            job.title = nil;
+
+            [jobs addObject:job];
+        }
     }
 
     NSMutableSet<NSURL *> *destinations = [[NSMutableSet alloc] init];
     for (HBJob *job in jobs)
     {
-        if ([destinations containsObject:job.completeOutputURL])
+        if ([destinations containsObject:job.destinationURL])
         {
             fileExists = YES;
             break;
         }
         else
         {
-            [destinations addObject:job.completeOutputURL];
+            [destinations addObject:job.destinationURL];
         }
 
-        if ([[NSFileManager defaultManager] fileExistsAtPath:job.completeOutputURL.path] || [_queue itemExistAtURL:job.completeOutputURL])
+        if ([job.destinationURL checkResourceIsReachableAndReturnError:NULL] || [_queue itemExistAtURL:job.destinationURL])
         {
             fileExists = YES;
             break;
@@ -1313,7 +1486,7 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
 
     for (HBJob *job in jobs)
     {
-        if ([job.fileURL isEqual:job.completeOutputURL]) {
+        if ([job.fileURL isEqual:job.destinationURL]) {
             fileOverwritesSource = YES;
             break;
         }
@@ -1334,12 +1507,10 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
         [alert setInformativeText:NSLocalizedString(@"One or more file already exists. Do you want to overwrite?", @"File already exists alert -> informative text")];
         [alert addButtonWithTitle:NSLocalizedString(@"Cancel", @"File already exists alert -> first button")];
         [alert addButtonWithTitle:NSLocalizedString(@"Overwrite", @"File already exists alert -> second button")];
-#if defined(__MAC_11_0)
-    if (@available(macOS 11, *))
-    {
-        alert.buttons.lastObject.hasDestructiveAction = true;
-    }
-#endif
+        if (@available(macOS 11, *))
+        {
+            alert.buttons.lastObject.hasDestructiveAction = true;
+        }
         [alert setAlertStyle:NSAlertStyleCritical];
 
         [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse returnCode) {
@@ -1357,7 +1528,7 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
 
 - (IBAction)addAllTitlesToQueue:(id)sender
 {
-    [self doAddTitlesToQueue:self.core.titles];
+    [self doAddTitlesToQueue:self.core.titles range:nil];
 }
 
 #pragma mark - Picture
@@ -1377,33 +1548,70 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
 
 - (void)selectionDidChange
 {
-    self.selectedPreset = self.presetView.selectedPreset;
-    [self applyPreset:self.presetView.selectedPreset];
+    if (self.job)
+    {
+        BOOL success = [self doApplyPreset:self.presetView.selectedPreset];
+        if (success == YES)
+        {
+            self.selectedPreset = self.presetView.selectedPreset;
+        }
+    }
+    else
+    {
+        self.currentPreset = self.presetView.selectedPreset;
+        self.selectedPreset = self.presetView.selectedPreset;
+        [self.window.undoManager removeAllActions];
+    }
 }
 
 #pragma mark -  Presets
 
 - (BOOL)popoverShouldDetach:(NSPopover *)popover
 {
-    if (popover == self.presetsPopover) {
+    if (popover == self.presetsPopover)
+    {
         return YES;
     }
 
     return NO;
 }
 
+- (void)popoverDidDetach:(NSPopover *)popover
+{
+    if (popover == self.presetsPopover)
+    {
+        self.presetView.showHeader = YES;
+    }
+}
+
 - (IBAction)togglePresets:(id)sender
 {
-    if (self.presetsPopover)
+    NSToolbarItem *presetsToolbarItem = [self.window.toolbar HB_visibleToolbarItemWithIdentifier:TOOLBAR_PRESET];
+
+    if (self.presetsPopover.isShown)
     {
-        if (!self.presetsPopover.isShown)
+        [self.presetsPopover close];
+    }
+    else
+    {
+        NSView *target = presetsToolbarItem.view.window ? presetsToolbarItem.view : self.window.contentView;
+        if (self.window.toolbar.visible && presetsToolbarItem)
         {
-            NSView *target = [sender isKindOfClass:[NSView class]] ? (NSView *)sender : self.presetsItem.view.window ? self.presetsItem.view : self.window.contentView;
-            [self.presetsPopover showRelativeToRect:target.bounds ofView:target preferredEdge:NSMaxYEdge];
+#ifdef MAC_OS_VERSION_14_0
+            if (@available (macOS 14, *))
+            {
+                [self.presetsPopover showRelativeToToolbarItem:presetsToolbarItem];
+                self.presetView.showHeader = NO;
+            }
+            else
+#endif
+            {
+                [self.presetsPopover showRelativeToRect:target.bounds ofView:target preferredEdge:NSMaxYEdge];
+            }
         }
         else
         {
-            [self.presetsPopover close];
+            [self.presetsPopover showRelativeToRect:target.bounds ofView:target preferredEdge:NSMaxYEdge];
         }
     }
 }
@@ -1433,32 +1641,49 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
     HBPreset *preset = self.selectedPreset ? self.selectedPreset : self.currentPreset;
     if (preset)
     {
-        [self applyPreset:preset];
+        [self doApplyPreset:preset];
     }
 }
 
 - (void)applyPreset:(HBPreset *)preset
 {
-    NSParameterAssert(preset);
+    BOOL success = [self doApplyPreset:preset];
+    if (success == YES)
+    {
+        self.selectedPreset = preset;
+        self.presetView.selectedPreset = preset;
+    }
+}
+
+- (BOOL)doApplyPreset:(HBPreset *)preset
+{
+    BOOL success = NO;
 
     if (self.job)
     {
-        self.currentPreset = preset;
-
         // Remove the job observer so we don't update the file name
         // too many times while the preset is being applied
         [self removeJobObservers];
 
-        // Apply the preset to the current job
-        [self.job applyPreset:self.currentPreset];
+        NSError *error = nil;
+        success = [self.job applyPreset:preset error:&error];
 
         [self addJobObservers];
 
-        [self.autoNamer updateFileExtension];
-
-        // If Auto Naming is on, update the destination
-        [self.autoNamer updateFileName];
+        if (success == NO)
+        {
+            [self presentError:error];
+        }
+        else
+        {
+            self.currentPreset = preset;
+            [self.autoNamer updateFileExtension];
+            // If Auto Naming is on, update the destination
+            [self.autoNamer updateFileName];
+        }
     }
+
+    return success;
 }
 
 - (IBAction)showAddPresetPanel:(id)sender
@@ -1475,9 +1700,7 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
     [self.window beginSheet:addPresetController.window completionHandler:^(NSModalResponse returnCode) {
         if (returnCode == NSModalResponseOK)
         {
-            self.selectedPreset = addPresetController.preset;
             [self applyPreset:addPresetController.preset];
-            self.presetView.selectedPreset = addPresetController.preset;
         }
     }];
 }
@@ -1539,9 +1762,7 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
 
 - (IBAction)selectDefaultPreset:(id)sender
 {
-    self.selectedPreset = self.presetManager.defaultPreset;
     [self applyPreset:self.presetManager.defaultPreset];
-    self.presetView.selectedPreset = self.presetManager.defaultPreset;
 }
 
 - (IBAction)setDefaultPreset:(id)sender
@@ -1586,10 +1807,7 @@ static void *HBControllerLogLevelContext = &HBControllerLogLevelContext;
 {
     // Retrieve the preset stored in the NSMenuItem
     HBPreset *preset = [sender representedObject];
-
-    self.selectedPreset = preset;
     [self applyPreset:preset];
-    self.presetView.selectedPreset = preset;
 }
 
 @end
@@ -1638,7 +1856,16 @@ static NSTouchBarItemIdentifier HBTouchBarActivity = @"fr.handbrake.activity";
         NSCustomTouchBarItem *item = [[NSCustomTouchBarItem alloc] initWithIdentifier:identifier];
         item.customizationLabel = NSLocalizedString(@"Add To Queue", @"Touch bar");
 
-        NSButton *button = [NSButton buttonWithTitle:NSLocalizedString(@"Add To Queue", @"Touch bar") target:self action:@selector(addToQueue:)];
+        NSButton *button = nil;
+        if (@available (macOS 11, *))
+        {
+            NSImage *image = [NSImage imageNamed:@"photo.badge.plus"];
+            button = [NSButton buttonWithImage:image target:self action:@selector(addToQueue:)];
+        }
+        else
+        {
+            button = [NSButton buttonWithTitle:NSLocalizedString(@"Add To Queue", @"Touch bar") target:self action:@selector(addToQueue:)];
+        }
 
         item.view = button;
         return item;
@@ -1688,7 +1915,17 @@ static NSTouchBarItemIdentifier HBTouchBarActivity = @"fr.handbrake.activity";
         NSCustomTouchBarItem *item = [[NSCustomTouchBarItem alloc] initWithIdentifier:identifier];
         item.customizationLabel = NSLocalizedString(@"Show Activity Window", @"Touch bar");
 
-        NSButton *button = [NSButton buttonWithImage:[NSImage imageNamed:NSImageNameTouchBarGetInfoTemplate] target:nil action:@selector(showOutputPanel:)];
+        NSImage *image = nil;
+        if (@available (macOS 11, *))
+        {
+            image = [NSImage imageNamed:@"text.viewfinder"];
+        }
+        else
+        {
+            image = [NSImage imageNamed:NSImageNameTouchBarPlayTemplate];
+        }
+
+        NSButton *button = [NSButton buttonWithImage:image target:nil action:@selector(showOutputPanel:)];
 
         item.view = button;
         return item;

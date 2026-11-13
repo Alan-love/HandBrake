@@ -10,21 +10,24 @@
 namespace HandBrakeWPF.Services.Scan
 {
     using System;
+    using System.Collections;
     using System.Collections.Generic;
     using System.Diagnostics;
+    using System.Drawing;
+    using System.Drawing.Imaging;
+    using System.IO;
+    using System.Linq;
     using System.Windows.Media.Imaging;
 
     using HandBrake.Interop.Interop;
+    using HandBrake.Interop.Interop.HbLib;
     using HandBrake.Interop.Interop.Interfaces;
-    using HandBrake.Interop.Interop.Interfaces.Model;
-    using HandBrake.Interop.Interop.Interfaces.Model.Picture;
     using HandBrake.Interop.Interop.Interfaces.Model.Preview;
     using HandBrake.Interop.Interop.Json.Encode;
     using HandBrake.Interop.Interop.Json.Scan;
+    using HandBrake.Interop.Interop.Json.Shared;
 
-    using HandBrakeWPF.Factories;
     using HandBrakeWPF.Instance;
-    using HandBrakeWPF.Model.Filters;
     using HandBrakeWPF.Services.Encode.Factories;
     using HandBrakeWPF.Services.Encode.Model;
     using HandBrakeWPF.Services.Interfaces;
@@ -36,7 +39,7 @@ namespace HandBrakeWPF.Services.Scan
 
     using ILog = Logging.Interfaces.ILog;
     using ScanProgressEventArgs = HandBrake.Interop.Interop.Interfaces.EventArgs.ScanProgressEventArgs;
-    using Source = HandBrakeWPF.Services.Scan.Model.Source;
+    using Source = Model.Source;
     using Title = Model.Title;
 
     public class LibScan : IScan, IDisposable
@@ -46,8 +49,7 @@ namespace HandBrakeWPF.Services.Scan
         private readonly ILogInstanceManager logInstanceManager;
 
         private TitleFactory titleFactory = new TitleFactory();
-        private string currentSourceScanPath;
-        private IHandBrakeInstance instance;
+        private IScanInstance instance;
         private Action<bool, Source> postScanOperation;
         private bool isCancelled = false;
 
@@ -71,8 +73,8 @@ namespace HandBrakeWPF.Services.Scan
         /// Scan a Source Path.
         /// Title 0: scan all
         /// </summary>
-        /// <param name="sourcePath">
-        /// Path to the file to scan
+        /// <param name="sourcePaths">
+        /// Paths to the file to scan
         /// </param>
         /// <param name="title">
         /// int title number. 0 for scan all
@@ -80,8 +82,13 @@ namespace HandBrakeWPF.Services.Scan
         /// <param name="postAction">
         /// The post Action.
         /// </param>
-        public void Scan(string sourcePath, int title, Action<bool, Source> postAction)
+        public void Scan(List<string> sourcePaths, int title, Action<bool, Source> postAction)
         {
+            if (this.IsScanning)
+            {
+                return;
+            }
+
             // Try to cleanup any previous scan instances.
             if (this.instance != null)
             {
@@ -109,8 +116,9 @@ namespace HandBrakeWPF.Services.Scan
             this.instance.ScanCompleted += this.InstanceScanCompleted;
 
             // Start the scan on a back
-            this.ScanSource(sourcePath, title, this.userSettingService.GetUserSetting<int>(UserSettingConstants.PreviewScanCount));
+            this.ScanSource(sourcePaths, title, this.userSettingService.GetUserSetting<int>(UserSettingConstants.PreviewScanCount));
         }
+
 
         /// <summary>
         /// Kill the scan
@@ -162,10 +170,11 @@ namespace HandBrakeWPF.Services.Scan
         /// <param name="preview">
         /// The preview.
         /// </param>
+        /// <param name="showCropBoundaries">Render crop boundary borders on the preview image.</param>
         /// <returns>
         /// The <see cref="BitmapImage"/>.
         /// </returns>
-        public BitmapImage GetPreview(EncodeTask job, int preview)
+        public BitmapImage GetPreview(EncodeTask job, int preview, bool showCropBoundaries)
         {
             if (this.instance == null)
             {
@@ -175,10 +184,32 @@ namespace HandBrakeWPF.Services.Scan
             BitmapImage bitmapImage = null;
             try
             {
-                EncodeTaskFactory factory = new EncodeTaskFactory(this.userSettingService);
-                JsonEncodeObject jobDict = factory.Create(job, HBConfigurationFactory.Create());
+
+                EncodeTaskFactory factory = new EncodeTaskFactory(this.userSettingService, false);
+                JsonEncodeObject jobDict = factory.Create(job);
+
+                if (showCropBoundaries)
+                {
+                    // We want uncropped image so we can render an overlay on top.
+                    var cropFilter = jobDict.Filters.FilterList.FirstOrDefault(s => s.ID == (int)hb_filter_ids.HB_FILTER_CROP_SCALE);
+                    if (cropFilter != null)
+                    {
+                        jobDict.Filters.FilterList.Remove(cropFilter);
+                    }
+                }
+
+
                 RawPreviewData bitmapData = this.instance.GetPreview(jobDict, preview);
-                bitmapImage = BitmapUtilities.ConvertToBitmapImage(BitmapUtilities.ConvertByteArrayToBitmap(bitmapData));
+                if (bitmapData != null)
+                {
+                    Bitmap image = BitmapUtilities.ConvertByteArrayToBitmap(bitmapData);
+                    if (showCropBoundaries)
+                    {
+                        image = PreviewManager.RenderCropBorder(image, job.Cropping);
+                    }
+
+                    bitmapImage = BitmapUtilities.ConvertToBitmapImage(image);
+                }
             }
             catch (AccessViolationException e)
             {
@@ -186,6 +217,32 @@ namespace HandBrakeWPF.Services.Scan
             }
 
             return bitmapImage;
+        }
+
+        public BitmapImage GetCoverArt(CoverArt artwork, int title)
+        {
+            RawCoverArtData rawData = this.GetCoverArtRaw(artwork, title);
+            if (rawData != null)
+            {
+                try
+                {
+                    using (MemoryStream ms = new MemoryStream(rawData.RawBitmapData))
+                    {
+                        return BitmapUtilities.ConvertToBitmapImage(ms);
+                    }
+                }
+                catch (Exception exc)
+                {
+                    Debug.WriteLine(exc);
+                }
+            }
+
+            return null;
+        }
+
+        public RawCoverArtData GetCoverArtRaw(CoverArt artwork, int title)
+        {
+            return this.instance.GetCoverArt(title, artwork.ID);
         }
 
         /// <summary>
@@ -196,13 +253,13 @@ namespace HandBrakeWPF.Services.Scan
         /// </param>
         protected void ServiceLogMessage(string message)
         {
-            this.log.LogMessage(string.Format("{0} # {1}{0}", Environment.NewLine, message));
+            this.log.LogMessage(string.Format("{1} # {0}{1}", message, Environment.NewLine));
         }
 
         /// <summary>
         /// Start a scan for a given source path and title
         /// </summary>
-        /// <param name="sourcePath">
+        /// <param name="sourcePaths">
         /// Path to the source file
         /// </param>
         /// <param name="title">
@@ -211,22 +268,41 @@ namespace HandBrakeWPF.Services.Scan
         /// <param name="previewCount">
         /// The preview Count.
         /// </param>
-        private void ScanSource(object sourcePath, int title, int previewCount)
+        private void ScanSource(List<string> sourcePaths, int title, int previewCount)
         {
             try
             {
-                string source = sourcePath.ToString().EndsWith("\\") ? string.Format("\"{0}\\\\\"", sourcePath.ToString().TrimEnd('\\'))
-                              : "\"" + sourcePath + "\"";
-                this.currentSourceScanPath = source;
-
                 this.IsScanning = true;
 
                 TimeSpan minDuration = TimeSpan.FromSeconds(this.userSettingService.GetUserSetting<int>(UserSettingConstants.MinScanDuration));
+                TimeSpan maxDuration = TimeSpan.FromSeconds(this.userSettingService.GetUserSetting<int>(UserSettingConstants.MaxScanDuration));
 
                 HandBrakeUtils.SetDvdNav(!this.userSettingService.GetUserSetting<bool>(UserSettingConstants.DisableLibDvdNav));
 
+                List<string> excludedExtensions = this.userSettingService.GetUserSetting<List<string>>(UserSettingConstants.ExcludedExtensions);
+
+                bool nvdec = this.userSettingService.GetUserSetting<bool>(UserSettingConstants.EnableNvDecSupport);
+                bool amfdec = this.userSettingService.GetUserSetting<bool>(UserSettingConstants.EnableAmfDecSupport);
+                bool directx = this.userSettingService.GetUserSetting<bool>(UserSettingConstants.EnableDirectXDecoding);
+
+                int hwDecode = 0;
+                if (nvdec && HandBrakeHardwareEncoderHelper.IsNVDecAvailable)
+                {
+                    hwDecode = (int)NativeConstants.HB_DECODE_NVDEC;
+                }
+                if (amfdec && HandBrakeHardwareEncoderHelper.IsAMFDecAvailable)
+                {
+                    hwDecode = (int)NativeConstants.HB_DECODE_AMFDEC;
+                }
+                else if (directx && HandBrakeHardwareEncoderHelper.IsDirectXAvailable)
+                {
+                    hwDecode = (int)NativeConstants.HB_DECODE_MF;
+                }
+
+                bool keepDuplicateTitles = this.userSettingService.GetUserSetting<bool>(UserSettingConstants.KeepDuplicateTitles);
+
                 this.ServiceLogMessage("Starting Scan ...");
-                this.instance.StartScan(sourcePath.ToString(), previewCount, minDuration, title != 0 ? title : 0);
+                this.instance.StartScan(sourcePaths, previewCount, minDuration, maxDuration, title != 0 ? title : 0, excludedExtensions, hwDecode, keepDuplicateTitles);
 
                 this.ScanStarted?.Invoke(this, System.EventArgs.Empty);
             }
@@ -250,22 +326,14 @@ namespace HandBrakeWPF.Services.Scan
         {
             try
             {
-                this.ServiceLogMessage("Processing Scan Information ...");
                 bool cancelled = this.isCancelled;
                 this.isCancelled = false;
-
-                // TODO -> Might be a better place to fix this.
-                string path = this.currentSourceScanPath;
-                if (this.currentSourceScanPath.Contains("\""))
-                {
-                    path = this.currentSourceScanPath.Trim('\"');
-                }
 
                 // Process into internal structures.
                 Source sourceData = null;
                 if (this.instance?.Titles != null)
                 {
-                    sourceData = new Source { Titles = this.ConvertTitles(this.instance.Titles), ScanPath = path };
+                    sourceData = new Source(this.ConvertTitles(this.instance.Titles));
                 }
 
                 this.IsScanning = false;
@@ -294,6 +362,7 @@ namespace HandBrakeWPF.Services.Scan
             }
             finally
             {
+                this.IsScanning = false;
                 var handBrakeInstance = this.instance;
                 if (handBrakeInstance != null)
                 {

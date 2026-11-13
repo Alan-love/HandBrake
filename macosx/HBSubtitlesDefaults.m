@@ -16,6 +16,7 @@
     if (self)
     {
         _trackSelectionLanguages = [[NSMutableArray alloc] init];
+        _passthruName = NO;
     }
     return self;
 }
@@ -85,9 +86,18 @@
     _burnInBluraySubtitles = burnInBluraySubtitles;
 }
 
+- (void)setPassthruName:(BOOL)passthruName
+{
+    if (passthruName != _passthruName)
+    {
+        [[self.undo prepareWithInvocationTarget:self] setPassthruName:_passthruName];
+    }
+    _passthruName = passthruName;
+}
+
 #pragma mark - HBPresetCoding
 
-- (void)applyPreset:(HBPreset *)preset
+- (BOOL)applyPreset:(HBPreset *)preset error:(NSError * __autoreleasing *)outError
 {
     if ([preset[@"SubtitleTrackSelectionBehavior"] isEqualToString:@"first"])
     {
@@ -127,11 +137,15 @@
 
     self.burnInDVDSubtitles = [preset[@"SubtitleBurnDVDSub"] boolValue];
     self.burnInBluraySubtitles = [preset[@"SubtitleBurnBDSub"] boolValue];
+
+    self.passthruName = [preset[@"SubtitleTrackNamePassthru"] boolValue];
+
+    return YES;
 }
 
 - (void)applyPreset:(HBPreset *)preset jobSettings:(NSDictionary *)settings
 {
-    [self applyPreset:preset];
+    [self applyPreset:preset error:NULL];
 }
 
 - (void)writeToPreset:(HBMutablePreset *)preset
@@ -173,6 +187,9 @@
 
     preset[@"SubtitleBurnDVDSub"] = @(self.burnInDVDSubtitles);
     preset[@"SubtitleBurnBDSub"] = @(self.burnInBluraySubtitles);
+
+    preset[@"SubtitleTrackNamePassthru"] = @(self.passthruName);
+
 }
 
 #pragma mark - NSCopying
@@ -193,6 +210,8 @@
         copy->_burnInBehavior = _burnInBehavior;
         copy->_burnInDVDSubtitles = _burnInDVDSubtitles;
         copy->_burnInBluraySubtitles = _burnInBluraySubtitles;
+
+        copy->_passthruName = _passthruName;
     }
 
     return copy;
@@ -219,6 +238,8 @@
     encodeInteger(_burnInBehavior);
     encodeBool(_burnInDVDSubtitles);
     encodeBool(_burnInBluraySubtitles);
+
+    encodeBool(_passthruName);
 }
 
 - (instancetype)initWithCoder:(NSCoder *)decoder
@@ -243,6 +264,8 @@
     }
     decodeBool(_burnInDVDSubtitles);
     decodeBool(_burnInBluraySubtitles);
+
+    decodeBool(_passthruName);
 
     return self;
 

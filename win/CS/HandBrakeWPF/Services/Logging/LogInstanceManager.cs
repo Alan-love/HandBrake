@@ -13,15 +13,26 @@ namespace HandBrakeWPF.Services.Logging
     using System.IO;
     using System.Linq;
 
+    using HandBrakeWPF.Services.Interfaces;
     using HandBrakeWPF.Services.Logging.EventArgs;
     using HandBrakeWPF.Services.Logging.Interfaces;
+    using HandBrakeWPF.Services.Queue.Interfaces;
 
     public class LogInstanceManager : ILogInstanceManager
     {
+        private readonly IUserSettingService userSettingService;
+        private IQueueService queueService;
+
         private readonly object instanceLock = new object();
         private Dictionary<string, ILog> logInstances = new Dictionary<string, ILog>();
-        
-        public event EventHandler<LogFileEventArgs> NewLogInstanceRegistered;
+
+        public event EventHandler<LogFileEventArgs> LogInstancesChanged;
+
+        public LogInstanceManager(IUserSettingService userSettingService)
+        {
+            this.queueService = null;
+            this.userSettingService = userSettingService;
+        }
 
         public ILog ApplicationLogInstance { get; private set; }
 
@@ -37,7 +48,7 @@ namespace HandBrakeWPF.Services.Logging
                 }
             }
 
-            this.OnNewLogInstanceRegistered(new LogFileEventArgs(filename, log));
+            this.OnLogInstancesChanged(new LogFileEventArgs(filename, log, true));
         }
 
         public void Deregister(string filename)
@@ -53,13 +64,16 @@ namespace HandBrakeWPF.Services.Logging
                 }
             }
 
-            this.OnNewLogInstanceRegistered(new LogFileEventArgs(filename, null));
+            this.OnLogInstancesChanged(new LogFileEventArgs(filename, null, false));
         }
 
         public void ResetApplicationLog()
         {
-            this.ApplicationLogInstance.Reset();
-            this.OnNewLogInstanceRegistered(new LogFileEventArgs(this.ApplicationLogInstance.FileName, this.ApplicationLogInstance));
+            if (this.CanResetLog())
+            {
+                this.ApplicationLogInstance.Reset();
+                this.OnLogInstancesChanged(new LogFileEventArgs(this.ApplicationLogInstance.FileName, this.ApplicationLogInstance, true));
+            }
         }
 
         public List<string> GetLogFiles()
@@ -99,9 +113,28 @@ namespace HandBrakeWPF.Services.Logging
             return null;
         }
 
-        protected virtual void OnNewLogInstanceRegistered(LogFileEventArgs e)
+        public void SetQueue(IQueueService queueService)
         {
-            this.NewLogInstanceRegistered?.Invoke(this, e);
+            this.queueService = queueService;
+        }
+
+        protected virtual void OnLogInstancesChanged(LogFileEventArgs e)
+        {
+            this.LogInstancesChanged?.Invoke(this, e);
+        }
+
+        private bool CanResetLog()
+        {
+            // If we are running in-process and already encoding, don't allow log resets.
+            if (!userSettingService.GetUserSetting<bool>(UserSettingConstants.ProcessIsolationEnabled))
+            {
+                if (this.queueService.IsEncoding || this.queueService.IsPaused || this.queueService.IsProcessing)
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
     }
 }

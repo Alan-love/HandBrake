@@ -9,7 +9,14 @@
 
 namespace HandBrakeWPF.Views
 {
+    using HandBrakeWPF.Helpers;
+    using HandBrakeWPF.Model;
+    using HandBrakeWPF.Services.Encode.Model.Models;
+    using HandBrakeWPF.ViewModels;
+    using System.Windows;
     using System.Windows.Controls;
+    using System.Windows.Input;
+    using System.Windows.Media;
 
     /// <summary>
     /// Interaction logic for MetaDataView.xaml
@@ -22,6 +29,78 @@ namespace HandBrakeWPF.Views
         public MetaDataView()
         {
             this.InitializeComponent();
+        }
+
+        private void CoverArtPreview_OnClick(object sender, RoutedEventArgs e)
+        {
+            if (this.DataContext is MetaDataViewModel viewModel &&
+                viewModel.CoverArtImage is CoverArtImage coverArt &&
+                coverArt.Enabled && !coverArt.IsNoCoverArt && coverArt.Image != null)
+            {
+                CoverArtPreviewView preview = new CoverArtPreviewView(coverArt.Image, viewModel.CreateCoverArtRawLoader(coverArt.CoverArt))
+                {
+                    Owner = Window.GetWindow(this)
+                };
+                preview.ShowDialog();
+            }
+        }
+
+        private void MetadataValue_OnPreviewMouseDown(object sender, MouseButtonEventArgs e)
+        {
+            TextBox tb = sender as TextBox;
+            if (tb != null)
+            {
+                MetaDataValue c = tb.DataContext as MetaDataValue;
+                ListView lv = VisualTreeUtils.FindAncestor<ListView>(tb);
+                if (lv != null && c != null)
+                {
+                    lv.SelectedItem = c;
+                }
+            }
+        }
+
+        private void MetadataList_OnKeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.Key == Key.Enter)
+            {
+                this.metadataList.Focus();
+                this.metadataList.SelectedIndex += 1; // increase
+
+                this.metadataList.ScrollIntoView(this.metadataList.SelectedItem);
+
+                // Attempt to focus and select the text box text.
+                ItemContainerGenerator generator = this.metadataList.ItemContainerGenerator;
+                ListViewItem selectedItem = generator.ContainerFromIndex(this.metadataList.SelectedIndex) as ListViewItem;
+                if (selectedItem != null)
+                {
+                    IInputElement firstFocusable = FindFirstFocusableElement(selectedItem);
+                    if (firstFocusable != null)
+                    {
+                        firstFocusable.Focus();
+                        TextBox textbox = firstFocusable as TextBox;
+                        if (textbox != null)
+                        {
+                            textbox.SelectAll();
+                        }
+                    }
+                }
+            }
+        }
+
+        private IInputElement FindFirstFocusableElement(DependencyObject obj)
+        {
+            IInputElement firstFocusable = null;
+
+            int count = VisualTreeHelper.GetChildrenCount(obj);
+            for (int i = 0; i < count && null == firstFocusable; i++)
+            {
+                DependencyObject child = VisualTreeHelper.GetChild(obj, i);
+                firstFocusable = child is IInputElement inputElement && inputElement.Focusable
+                    ? inputElement
+                    : this.FindFirstFocusableElement(child);
+            }
+
+            return firstFocusable;
         }
     }
 }

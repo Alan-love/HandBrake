@@ -1,6 +1,6 @@
 /* audio_resample.c
  *
- * Copyright (c) 2003-2021 HandBrake Team
+ * Copyright (c) 2003-2026 HandBrake Team
  * This file is part of the HandBrake source code
  * Homepage: <http://handbrake.fr/>
  * It may be used under the terms of the GNU General Public License v2.
@@ -38,23 +38,24 @@ hb_audio_resample_t* hb_audio_resample_init(enum AVSampleFormat sample_fmt,
     uint64_t channel_layout = hb_ff_mixdown_xlat(hb_amixdown, &matrix_encoding);
 
     /*
-     * When downmixing, Dual Mono to Mono is a special case:
-     * the audio must remain 2-channel until all conversions are done.
+     * Mono (Left Only) and Mono (Right Only) output a Mono channel_layout,
+     * use a custom remix matrix which selects a single input channel.
      */
-    if (hb_amixdown == HB_AMIXDOWN_LEFT || hb_amixdown == HB_AMIXDOWN_RIGHT)
+    switch (hb_amixdown)
     {
-        channel_layout                 = AV_CH_LAYOUT_STEREO;
-        resample->dual_mono_downmix    = 1;
-        resample->dual_mono_right_only = (hb_amixdown == HB_AMIXDOWN_RIGHT);
-    }
-    else
-    {
-        resample->dual_mono_downmix = 0;
+        case HB_AMIXDOWN_LEFT:
+            resample->mono_source_channel = AV_CHAN_FRONT_LEFT;
+            break;
+        case HB_AMIXDOWN_RIGHT:
+            resample->mono_source_channel = AV_CHAN_FRONT_RIGHT;
+            break;
+        default:
+            resample->mono_source_channel = AV_CHAN_NONE;
+            break;
     }
 
     // requested output channel_layout, sample_fmt
-    resample->out.channels = av_get_channel_layout_nb_channels(channel_layout);
-    resample->out.channel_layout      = channel_layout;
+    av_channel_layout_from_mask(&resample->out.ch_layout, channel_layout);
     resample->out.matrix_encoding     = matrix_encoding;
     resample->out.sample_fmt          = sample_fmt;
     resample->out.sample_rate         = sample_rate;
@@ -71,7 +72,7 @@ hb_audio_resample_t* hb_audio_resample_init(enum AVSampleFormat sample_fmt,
     // set default input characteristics
     resample->in.sample_fmt         = resample->out.sample_fmt;
     resample->in.sample_rate        = resample->out.sample_rate;
-    resample->in.channel_layout     = resample->out.channel_layout;
+    av_channel_layout_copy(&resample->in.ch_layout, &resample->out.ch_layout);
     resample->in.lfe_mix_level      = HB_MIXLEV_ZERO;
     resample->in.center_mix_level   = HB_MIXLEV_DEFAULT;
     resample->in.surround_mix_level = HB_MIXLEV_DEFAULT;
@@ -85,44 +86,30 @@ fail:
     return NULL;
 }
 
-static int is_mono(uint64_t layout)
-{
-    int ii, channel_count;
-    int64_t mask;
-
-    if (layout == AV_CH_LAYOUT_NATIVE)
-    {
-        return 0;
-    }
-    for (ii = 0, channel_count = 0, mask = 1;
-         ii < 64 && channel_count < 2; ii++, mask <<= 1)
-    {
-        if (layout & mask)
-        {
-            channel_count++;
-        }
-    }
-    return channel_count == 1;
-}
-
-void hb_audio_resample_set_channel_layout(hb_audio_resample_t *resample,
-                                          uint64_t channel_layout)
+void hb_audio_resample_set_ch_layout(hb_audio_resample_t *resample,
+                                     const AVChannelLayout *ch_layout)
 {
     if (resample != NULL)
     {
-        if (channel_layout == AV_CH_LAYOUT_STEREO_DOWNMIX)
+        AVChannelLayout mono = AV_CHANNEL_LAYOUT_MONO;
+        AVChannelLayout stereo_dowmix = AV_CHANNEL_LAYOUT_STEREO_DOWNMIX;
+        if (av_channel_layout_compare(ch_layout, &stereo_dowmix) == 0)
         {
             // Dolby Surround is Stereo when it comes to remixing
-            channel_layout = AV_CH_LAYOUT_STEREO;
+            AVChannelLayout stereo = AV_CHANNEL_LAYOUT_STEREO;
+            av_channel_layout_copy(&resample->in.ch_layout, &stereo);
         }
         // swresample can't remap a single-channel layout to
         // another single-channel layout
-        if (resample->out.channel_layout == AV_CH_LAYOUT_MONO &&
-            is_mono(channel_layout))
+        else if (av_channel_layout_compare(ch_layout, &mono) == 0 &&
+                 ch_layout->nb_channels == 1)
         {
-            channel_layout = AV_CH_LAYOUT_MONO;
+            av_channel_layout_copy(&resample->in.ch_layout, &mono);
         }
-        resample->in.channel_layout = channel_layout;
+        else
+        {
+            av_channel_layout_copy(&resample->in.ch_layout, ch_layout);
+        }
     }
 }
 
@@ -157,6 +144,51 @@ void hb_audio_resample_set_sample_rate(hb_audio_resample_t *resample,
     }
 }
 
+/*
+ * Mono (Left Only) / Mono (Right Only): special Stereo-only mixdowns that
+ * keep only the front left (or front right) channel via a custom remix matrix.
+ */
+static int hb_audio_resample_set_mono_source_matrix(hb_audio_resample_t *resample)
+{
+    const AVChannelLayout *in = &resample->in.ch_layout;
+    double *matrix;
+    int index, ret;
+
+    index = av_channel_layout_index_from_channel(in,
+                                                 resample->mono_source_channel);
+    if (index < 0)
+    {
+        if (in->nb_channels > 1)
+        {
+            char description[256];
+            av_channel_layout_describe(in, description, sizeof(description));
+            hb_log("hb_audio_resample_set_mono_source_matrix: no %s channel "
+                   "in input layout %s, downmixing to Mono",
+                   resample->mono_source_channel == AV_CHAN_FRONT_RIGHT ?
+                   "front right" : "front left", description);
+        }
+        return 0;
+    }
+
+    matrix = av_calloc(in->nb_channels, sizeof(*matrix));
+    if (matrix == NULL)
+    {
+        hb_error("hb_audio_resample_set_mono_source_matrix: "
+                 "failed to allocate matrix");
+        return AVERROR(ENOMEM);
+    }
+    matrix[index] = 1.0;
+
+    ret = swr_set_matrix(resample->swresample, matrix, in->nb_channels);
+    av_free(matrix);
+    if (ret < 0)
+    {
+        hb_error("hb_audio_resample_set_mono_source_matrix: "
+                 "swr_set_matrix() failed (%s)", av_err2str(ret));
+    }
+    return ret;
+}
+
 int hb_audio_resample_update(hb_audio_resample_t *resample)
 {
     if (resample == NULL)
@@ -170,13 +202,13 @@ int hb_audio_resample_update(hb_audio_resample_t *resample)
     resample->resample_needed =
         (resample->out.sample_fmt != resample->in.sample_fmt ||
          resample->out.sample_rate != resample->in.sample_rate ||
-         resample->out.channel_layout != resample->in.channel_layout);
+         av_channel_layout_compare(&resample->out.ch_layout, &resample->in.ch_layout));
 
     resample_changed =
         (resample->resample_needed &&
          (resample->resample.sample_fmt != resample->in.sample_fmt ||
           resample->resample.sample_rate != resample->in.sample_rate ||
-          resample->resample.channel_layout != resample->in.channel_layout ||
+          av_channel_layout_compare(&resample->resample.ch_layout, &resample->in.ch_layout) ||
           resample->resample.lfe_mix_level != resample->in.lfe_mix_level ||
           resample->resample.center_mix_level != resample->in.center_mix_level ||
           resample->resample.surround_mix_level != resample->in.surround_mix_level));
@@ -184,6 +216,10 @@ int hb_audio_resample_update(hb_audio_resample_t *resample)
     if (resample_changed || (resample->resample_needed &&
                              resample->swresample == NULL))
     {
+        if (resample->mono_source_channel != AV_CHAN_NONE)
+        {
+            swr_free(&resample->swresample);
+        }
         if (resample->swresample == NULL)
         {
             resample->swresample = swr_alloc();
@@ -197,8 +233,8 @@ int hb_audio_resample_update(hb_audio_resample_t *resample)
                            resample->out.sample_fmt, 0);
             av_opt_set_int(resample->swresample, "out_sample_rate",
                            resample->out.sample_rate, 0);
-            av_opt_set_int(resample->swresample, "out_channel_layout",
-                           resample->out.channel_layout, 0);
+            av_opt_set_chlayout(resample->swresample, "out_chlayout",
+                           &resample->out.ch_layout, 0);
             av_opt_set_int(resample->swresample, "matrix_encoding",
                            resample->out.matrix_encoding, 0);
             av_opt_set_double(resample->swresample, "rematrix_maxval",
@@ -209,8 +245,8 @@ int hb_audio_resample_update(hb_audio_resample_t *resample)
                        resample->in.sample_fmt, 0);
         av_opt_set_int(resample->swresample, "in_sample_rate",
                        resample->in.sample_rate, 0);
-        av_opt_set_int(resample->swresample, "in_channel_layout",
-                       resample->in.channel_layout, 0);
+        av_opt_set_chlayout(resample->swresample, "in_chlayout",
+                       &resample->in.ch_layout, 0);
         av_opt_set_double(resample->swresample, "lfe_mix_level",
                           resample->in.lfe_mix_level, 0);
         av_opt_set_double(resample->swresample, "center_mix_level",
@@ -218,12 +254,18 @@ int hb_audio_resample_update(hb_audio_resample_t *resample)
         av_opt_set_double(resample->swresample, "surround_mix_level",
                           resample->in.surround_mix_level, 0);
 
-        if ((ret = swr_init(resample->swresample)))
+        ret = 0;
+        if (resample->mono_source_channel != AV_CHAN_NONE)
         {
-            char err_desc[64];
-            av_strerror(ret, err_desc, 63);
+            ret = hb_audio_resample_set_mono_source_matrix(resample);
+        }
+        if (ret == 0 && (ret = swr_init(resample->swresample)))
+        {
             hb_error("hb_audio_resample_update: swr_init() failed (%s)",
-                     err_desc);
+                     av_err2str(ret));
+        }
+        if (ret)
+        {
             // swresample won't open, start over
             swr_free(&resample->swresample);
             return ret;
@@ -231,9 +273,7 @@ int hb_audio_resample_update(hb_audio_resample_t *resample)
 
         resample->resample.sample_fmt         = resample->in.sample_fmt;
         resample->resample.sample_rate        = resample->in.sample_rate;
-        resample->resample.channel_layout     = resample->in.channel_layout;
-        resample->resample.channels           =
-            av_get_channel_layout_nb_channels(resample->in.channel_layout);
+        av_channel_layout_copy(&resample->resample.ch_layout, &resample->in.ch_layout);
         resample->resample.lfe_mix_level      = resample->in.lfe_mix_level;
         resample->resample.center_mix_level   = resample->in.center_mix_level;
         resample->resample.surround_mix_level = resample->in.surround_mix_level;
@@ -246,6 +286,10 @@ void hb_audio_resample_free(hb_audio_resample_t *resample)
 {
     if (resample != NULL)
     {
+        av_channel_layout_uninit(&resample->in.ch_layout);
+        av_channel_layout_uninit(&resample->resample.ch_layout);
+        av_channel_layout_uninit(&resample->out.ch_layout);
+
         if (resample->swresample != NULL)
         {
             swr_free(&resample->swresample);
@@ -274,9 +318,11 @@ hb_buffer_t* hb_audio_resample(hb_audio_resample_t *resample,
 
     if (resample->resample_needed)
     {
-        out_samples = nsamples  * resample->out.sample_rate /
-                                  resample->in.sample_rate + 1;
-        out_size = av_samples_get_buffer_size(NULL, resample->out.channels,
+        // Compute in 64 bit, nsamples * sample_rate can overflow an int
+        // (e.g. 16384 samples FLAC frames at 192 kHz)
+        out_samples = (int64_t)nsamples * resample->out.sample_rate /
+                                          resample->in.sample_rate + 1;
+        out_size = av_samples_get_buffer_size(NULL, resample->out.ch_layout.nb_channels,
                                               out_samples,
                                               resample->out.sample_fmt, 0);
         out = hb_buffer_init(out_size);
@@ -294,36 +340,17 @@ hb_buffer_t* hb_audio_resample(hb_audio_resample_t *resample,
             return NULL;
         }
         out->size = (out_samples *
-                     resample->out.sample_size * resample->out.channels);
+                     resample->out.sample_size * resample->out.ch_layout.nb_channels);
     }
     else
     {
         out_samples = nsamples;
         out_size = (out_samples *
-                    resample->out.sample_size * resample->out.channels);
+                    resample->out.sample_size * resample->out.ch_layout.nb_channels);
         out = hb_buffer_init(out_size);
         memcpy(out->data, samples[0], out_size);
     }
 
-    /*
-     * Dual Mono to Mono.
-     *
-     * Copy all left or right samples to the first half of the buffer and halve
-     * the buffer size.
-     */
-    if (resample->dual_mono_downmix)
-    {
-        int ii, jj = !!resample->dual_mono_right_only;
-        int sample_size = resample->out.sample_size;
-        uint8_t *audio_samples = out->data;
-        for (ii = 0; ii < out_samples; ii++)
-        {
-            memcpy(audio_samples + (ii * sample_size),
-                   audio_samples + (jj * sample_size), sample_size);
-            jj += 2;
-        }
-        out->size = out_samples * sample_size;
-    }
     out->s.duration = 90000. * out_samples / resample->out.sample_rate;
 
     return out;

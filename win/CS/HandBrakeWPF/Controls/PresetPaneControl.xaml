@@ -1,0 +1,225 @@
+﻿<UserControl x:Class="HandBrakeWPF.Controls.PresetPaneControl"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" 
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008" 
+             xmlns:Properties="clr-namespace:HandBrakeWPF.Properties"
+             xmlns:loc="clr-namespace:HandBrakeWPF.Services.Presets.Model"
+             xmlns:converters="clr-namespace:HandBrakeWPF.Converters"
+             mc:Ignorable="d" 
+             d:DesignHeight="700" d:DesignWidth="450">
+
+    <UserControl.Resources>
+        <converters:ThemeImageConverter x:Key="themeConverter" />
+        <converters:BooleanToVisibilityConverter x:Key="boolToVisConverter" />
+    </UserControl.Resources>
+
+    <Border CornerRadius="4" BorderBrush="{StaticResource Ui.ContrastLight}" Background="{DynamicResource Ui.Light}" BorderThickness="1">
+        <Grid Margin="5" ZIndex="1">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <Grid.Resources>
+
+                <DataTemplate DataType="{x:Type loc:Preset}">
+                    <Grid Margin="16,0,0,0">
+                        <Grid.Resources>
+                            <Style TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsDefault}" Value="True" >
+                                        <Setter Property="FontStyle" Value="Italic" />
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding IsDefault}" Value="False" >
+                                        <Setter Property="FontStyle" Value="Normal" />
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding IsPresetDisabled}" Value="True">
+                                        <Setter Property="Foreground" Value="{StaticResource Ui.ContrastLight}" />
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding DataContext.IsPresetDescriptionVisible, RelativeSource={RelativeSource AncestorType=UserControl}}" Value="True">
+                                        <Setter Property="FontWeight" Value="SemiBold" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Grid.Resources>
+
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="2">
+                            <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
+                            <TextBlock Text="{x:Static Properties:Resources.Preset_Default}" Margin="10,0,0,0" Visibility="{Binding IsDefault, Converter={StaticResource boolToVisConverter}}"  />
+                            <TextBlock Text="{x:Static Properties:Resources.Preset_NotAvailable}" Margin="10,0,0,0" Visibility="{Binding IsPresetDisabled, Converter={StaticResource boolToVisConverter}}" />
+                        </StackPanel>
+
+                        <StackPanel Orientation="Vertical" Grid.Row="1" 
+                                    Visibility="{Binding DataContext.IsPresetDescriptionVisible, Converter={StaticResource boolToVisConverter}, RelativeSource={RelativeSource AncestorType=UserControl}}">
+                            <TextBlock Text="{Binding Description}" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" Margin="0,2,10,3" MaxHeight="40" >
+                                <TextBlock.Resources>
+                                    <Style TargetType="TextBlock" BasedOn="{StaticResource subTextSmallest}">
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsPresetDisabled}" Value="True">
+                                                <Setter Property="Foreground" Value="{StaticResource Ui.ContrastLight}" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Resources>
+                            </TextBlock>
+                        </StackPanel>
+             
+                    </Grid>
+                </DataTemplate>
+
+                <DataTemplate DataType="{x:Type loc:PresetDisplayCategory}">
+                    <StackPanel Orientation="Horizontal" Background="Transparent" Margin="4">
+                        <Path x:Name="chevron" Width="8" Height="8" Margin="0,0,8,0" VerticalAlignment="Center" Stretch="Uniform"
+                              Data="M 0 0 L 4 4 L 0 8 Z" Fill="{DynamicResource ButtonGlyphBrush}" />
+                        <TextBlock Text="{Binding Category}" FontSize="14" />
+                    </StackPanel>
+                    <DataTemplate.Triggers>
+                        <DataTrigger Binding="{Binding IsExpanded}" Value="True">
+                            <Setter TargetName="chevron" Property="Data" Value="M 0 0 L 8 0 L 4 4 Z" />
+                        </DataTrigger>
+                    </DataTemplate.Triggers>
+                </DataTemplate>
+            </Grid.Resources>
+
+            <Grid Grid.Row="0" Margin="0,0,0,4">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <Button Command="{Binding RelayCommand}" CommandParameter="PresetAdd" AutomationProperties.Name="Add Preset" Height="29" 
+                        ToolTip="{x:Static Properties:ResourcesTooltips.MainView_AddPreset}">
+                    <Button.Content>
+                        <StackPanel Orientation="Horizontal">
+                            <Image Width="18" Height="18" SnapsToDevicePixels="True" Source="{Binding Converter={StaticResource themeConverter}, ConverterParameter='Add.png'}" />
+                            <TextBlock Margin="2,0,0,0" VerticalAlignment="Center" Text="{x:Static Properties:Resources.AddPresetView_AddPreset}" />
+                        </StackPanel>
+                    </Button.Content>
+                </Button>
+
+                <Button x:Name="presetOptionsBtn" Grid.Column="2" Margin="0,0,0,0" Click="PresetOptionsBtn_OnClick" Height="29">
+                    <Button.Content>
+                        <StackPanel Orientation="Horizontal">
+                            <Image Source="{Binding Converter={StaticResource themeConverter}, ConverterParameter='Advanced.png'}" Width="20" Height="20" VerticalAlignment="Center" />
+                            <TextBlock VerticalAlignment="Center"
+                                       Text="{x:Static Properties:Resources.QueueView_Options}" Margin="5,0,0,0" />
+                            <Path Height="5" Margin="2,2,0,0" VerticalAlignment="Center" HorizontalAlignment="Center"
+                                  Data="M 0 0 L 4 4 L 8 0 Z"
+                                  Fill="{DynamicResource ButtonGlyphBrush}" x:Name="dropdownArrowPreset" />
+                        </StackPanel>
+                    </Button.Content>
+
+                    <Button.ContextMenu>
+                        <ContextMenu x:Name="MainContextMenu" PlacementRectangle="{Binding RelativeSource={RelativeSource Self}}">
+                            <MenuItem Command="{Binding RelayCommand}" CommandParameter="PresetImport" Header="{x:Static Properties:Resources.ManagePresetView_Import}" />
+                            <MenuItem Command="{Binding RelayCommand}" CommandParameter="PresetExport" Header="{x:Static Properties:Resources.ManagePresetView_Export}" />
+                            <MenuItem Command="{Binding RelayCommand}" CommandParameter="ExportUserPresets" Header="{x:Static Properties:Resources.ManagePresetView_ExportUserPresets}" />
+                            <Separator />
+                            <MenuItem Command="{Binding RelayCommand}" CommandParameter="PresetSetDefault" Header="{x:Static Properties:Resources.ManagePresetView_SetDefault}" />
+                            <MenuItem Command="{Binding RelayCommand}" CommandParameter="PresetManage" Header="{x:Static Properties:Resources.MainView_PresetManage}" />
+                            <MenuItem Command="{Binding PresetClone}" CommandParameter="{Binding}" Header="{x:Static Properties:Resources.MainView_PresetClone}" />
+                            <MenuItem Command="{Binding RelayCommand}" CommandParameter="PresetRemoveSelected" Header="{x:Static Properties:Resources.PresetManagerView_Delete}" />
+                            <Separator />
+                            <MenuItem Command="{Binding RelayCommand}" CommandParameter="PresetReset" Header="{x:Static Properties:Resources.MainView_ResetPresets}" />
+                            <MenuItem Command="{Binding RelayCommand}" CommandParameter="PresetDeleteBuildIn" Header="{x:Static Properties:Resources.ManagePresetView_DeleteBuiltIn}" />
+                            <Separator />
+                            <MenuItem Command="{Binding RelayCommand}" CommandParameter="ShowHidePresetDesc" Header="{x:Static Properties:Resources.PresetPane_ShowPresetDesc}" x:Name="presetDescMenuItem" />
+                            <Separator />
+                            <MenuItem Header="{x:Static Properties:Resources.Shared_ExpandAll}" x:Name="presetExpandAllOptions" Click="PresetExpandAll_OnClick"  />
+                            <MenuItem Header="{x:Static Properties:Resources.Shared_CollapseAll}" x:Name="presetCollapseAllOptions" Click="PresetCollapseAll_OnClick" />
+                        </ContextMenu>
+                    </Button.ContextMenu>
+                </Button>
+            </Grid>
+
+            <Grid Grid.Row="1" Margin="0,0,0,4">
+                <TextBox x:Name="presetSearchBox" Height="26" VerticalContentAlignment="Center" Padding="2,0,24,0"
+                         AutomationProperties.Name="{x:Static Properties:Resources.PresetPane_Search}"
+                         TextChanged="PresetSearchBox_OnTextChanged" />
+                <TextBlock Text="{x:Static Properties:Resources.PresetPane_Search}" Foreground="{StaticResource Ui.ContrastLight}"
+                           IsHitTestVisible="False" VerticalAlignment="Center" Margin="6,0,0,0">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
+                            <Setter Property="Visibility" Value="Collapsed" />
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding Text.Length, ElementName=presetSearchBox}" Value="0">
+                                    <Setter Property="Visibility" Value="Visible" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                </TextBlock>
+                <Button x:Name="presetSearchClear"  HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,5,0" Padding="8,2"
+                        Click="PresetSearchClear_OnClick" Focusable="False" Background="Transparent" BorderThickness="0"
+                        AutomationProperties.Name="{x:Static Properties:Resources.PresetPane_ClearSearch}"
+                        ToolTip="{x:Static Properties:Resources.PresetPane_ClearSearch}">
+                    <Path Width="8" Height="8" Stretch="Uniform" Data="M 0 0 L 8 8 M 8 0 L 0 8" Stroke="{DynamicResource ButtonGlyphBrush}" StrokeThickness="1.5" />
+                    <Button.Style>
+                        <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+                            <Setter Property="Visibility" Value="Visible" />
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding Text.Length, ElementName=presetSearchBox}" Value="0">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Button.Style>
+                </Button>
+            </Grid>
+
+            <ListView x:Name="presetListView" HorizontalAlignment="Stretch" AutomationProperties.Name="Presets List" ToolTip="{x:Static Properties:ResourcesTooltips.MainView_Presets}"
+                              VerticalAlignment="Stretch" Grid.Row="2" Width="350"
+                              SelectionMode="Single"
+                              ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                              SelectionChanged="PresetListView_OnSelectionChanged"
+                              PreviewMouseLeftButtonDown="PresetListView_OnPreviewMouseLeftButtonDown"
+                              PreviewMouseRightButtonDown="PresetListView_OnPreviewMouseRightButtonDown">
+
+                <ListView.CommandBindings>
+                    <CommandBinding Command="Delete" Executed="Delete_Execute" />
+                </ListView.CommandBindings>
+
+                <ListView.ItemContainerStyle>
+                    <Style TargetType="ListBoxItem" BasedOn="{StaticResource ModernListBoxItemStyle}">
+                        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                        <Setter Property="Margin" Value="0"/>
+                        <Setter Property="Padding" Value="5,4"></Setter>
+                        <Setter Property="ToolTip" Value="{Binding Description}" />
+                        <Setter Property="ToolTipService.InitialShowDelay" Value="1500"/>
+                        <EventSetter Event="Loaded" Handler="PresetListViewItem_OnLoaded" />
+                    </Style>
+                </ListView.ItemContainerStyle>
+
+                <ListView.ContextMenu>
+                    <ContextMenu AutomationProperties.Name="Presets List Context Menu" Opened="ContextMenu_OnOpened">
+                        <MenuItem Header="{x:Static Properties:Resources.MainView_SetDefault}" x:Name="setDefault" Command="{Binding RelayCommand}" CommandParameter="PresetSetDefault" />
+                        <Separator x:Name="moveSplitter1" />
+                        <MenuItem Header="{x:Static Properties:Resources.MainView_PresetManage}" x:Name="editPresetMenuItem" Command="{Binding RelayCommand}" CommandParameter="PresetManage" />
+                        <MenuItem Command="{Binding PresetClone}" CommandParameter="{Binding}"  x:Name="clonePresetMenuItem" Header="{x:Static Properties:Resources.MainView_PresetClone}" />
+                        <MenuItem Header="{x:Static Properties:Resources.PresetManagerView_Delete}"  x:Name="deletePresetMenuItem" Click="Delete_OnClick" InputGestureText="Del" />
+                        <Separator x:Name="moveSplitter2" />
+                        <MenuItem Header="{x:Static Properties:Resources.Preset_Import}" Command="{Binding RelayCommand}" CommandParameter="PresetImport" />
+                        <MenuItem Header="{x:Static Properties:Resources.Preset_Export}" Command="{Binding RelayCommand}" CommandParameter="PresetExport" />
+                        <Separator x:Name="moveSplitter" />
+                        <MenuItem Header="{x:Static Properties:Resources.PresetPane_MoveUp}" x:Name="moveUp" Command="{Binding PresetMove}" CommandParameter="up" />
+                        <MenuItem Header="{x:Static Properties:Resources.PresetPane_MoveDown}" x:Name="moveDown" Command="{Binding PresetMove}" CommandParameter="down" />
+                        <MenuItem Header="{x:Static Properties:Resources.PresetPane_MoveToTop}" x:Name="moveTop" Command="{Binding PresetMove}" CommandParameter="top" />
+                        <MenuItem Header="{x:Static Properties:Resources.PresetPane_MoveToBottom}" x:Name="moveBottom" Command="{Binding PresetMove}" CommandParameter="bottom" />
+                        <Separator />
+                        <MenuItem Header="{x:Static Properties:Resources.Shared_ExpandAll}" x:Name="presetExpandAll" Click="PresetExpandAll_OnClick"  />
+                        <MenuItem Header="{x:Static Properties:Resources.Shared_CollapseAll}" x:Name="presetCollapseAll" Click="PresetCollapseAll_OnClick" />
+                    </ContextMenu>
+                </ListView.ContextMenu>
+            </ListView>
+
+        </Grid>
+
+    </Border>
+</UserControl>

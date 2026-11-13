@@ -18,6 +18,7 @@ namespace HandBrakeWPF.Helpers
     using System.Text.RegularExpressions;
     using System.Windows;
 
+    using HandBrake.App.Core.Utilities;
     using HandBrake.Interop.Interop;
     using HandBrake.Interop.Utilities;
 
@@ -62,7 +63,6 @@ namespace HandBrakeWPF.Helpers
 
                 List<string> removeFiles = new List<string>();
                 List<string> acceptedFiles = new List<string>();
-
 
                 foreach (string file in queueFiles)
                 {

@@ -1,6 +1,6 @@
 /* decssasub.c
 
-   Copyright (c) 2003-2021 HandBrake Team
+   Copyright (c) 2003-2026 HandBrake Team
    This file is part of the HandBrake source code
    Homepage: <http://handbrake.fr/>.
    It may be used under the terms of the GNU General Public License v2.
@@ -26,19 +26,20 @@
 
 #include "handbrake/handbrake.h"
 #include "handbrake/decavsub.h"
+#include "handbrake/extradata.h"
 #include "libavformat/avformat.h"
 
 struct hb_work_private_s
 {
-    AVFormatContext    * ic;
-    hb_avsub_context_t * ctx;
-    AVPacket           * pkt;
-    hb_job_t           * job;
-    hb_subtitle_t      * subtitle;
+    AVFormatContext       * ic;
+    hb_decavsub_context_t * ctx;
+    AVPacket              * pkt;
+    hb_job_t              * job;
+    hb_subtitle_t         * subtitle;
 
     // Time of first desired subtitle adjusted by reader_pts_offset
-    uint64_t start_time;
-    uint64_t stop_time;
+    int64_t start_time;
+    int64_t stop_time;
 };
 
 static int extradataInit( hb_work_private_t * pv )
@@ -57,11 +58,7 @@ static int extradataInit( hb_work_private_t * pv )
     }
     if (st->codecpar->extradata != NULL)
     {
-        pv->subtitle->extradata = malloc(st->codecpar->extradata_size + 1);
-        memcpy(pv->subtitle->extradata,
-               st->codecpar->extradata, st->codecpar->extradata_size);
-        pv->subtitle->extradata[st->codecpar->extradata_size] = 0;
-        pv->subtitle->extradata_size = st->codecpar->extradata_size + 1;
+        hb_set_extradata(&pv->subtitle->extradata, st->codecpar->extradata, st->codecpar->extradata_size);
     }
     return 0;
 }
@@ -100,13 +97,14 @@ static int decssaInit( hb_work_object_t * w, hb_job_t * job )
                  pv->subtitle->config.src_filename);
         goto fail;
     }
-    pv->ctx = decavsubInit(w, job);
-    if (pv->ctx == NULL)
+
+    if (extradataInit(pv))
     {
         goto fail;
     }
 
-    if (extradataInit(pv))
+    pv->ctx = decavsubInit(w, job);
+    if (pv->ctx == NULL)
     {
         goto fail;
     }
@@ -231,7 +229,9 @@ static hb_buffer_t * ssa_read( hb_work_private_t * pv )
     out->s.type = SUBTITLE_BUF;
     av_packet_unref(pv->pkt);
 
-    if (out->s.stop  <= pv->start_time || out->s.start >= pv->stop_time)
+    if (out->s.start == AV_NOPTS_VALUE ||
+        (out->s.stop != AV_NOPTS_VALUE && out->s.stop <= pv->start_time) ||
+        out->s.start >= pv->stop_time)
     {
         // Drop subtitles that end before the PtoP start time
         // or start after the PtoP stop time
@@ -246,7 +246,7 @@ static hb_buffer_t * ssa_read( hb_work_private_t * pv )
         {
             out->s.start = pv->start_time;
         }
-        if (out->s.stop > pv->stop_time)
+        if (out->s.stop == AV_NOPTS_VALUE || out->s.stop > pv->stop_time)
         {
             out->s.stop = pv->stop_time;
         }

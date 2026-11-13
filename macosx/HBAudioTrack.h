@@ -8,12 +8,20 @@
 
 @class HBAudioTrack;
 @class HBTitleAudioTrack;
+@class HBAudioFilters;
 
 NS_ASSUME_NONNULL_BEGIN
+
+typedef NS_ENUM(NSUInteger, HBAudioEncoderMode)
+{
+    HBAudioEncoderModeABR,
+    HBAudioEncoderModeQuality,
+};
 
 @protocol HBAudioTrackDataSource <NSObject>
 - (HBTitleAudioTrack *)sourceTrackAtIndex:(NSUInteger)idx;
 - (NSArray<NSString *> *)sourceTracksArray;
+- (nullable NSString *)defaultTitleForTrackAtIndex:(NSUInteger)idx mixdown:(int)mixdown;
 @end
 
 @protocol HBAudioTrackDelegate <NSObject>
@@ -41,10 +49,15 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readwrite) int encoder;
 @property (nonatomic, readwrite) int mixdown;
 @property (nonatomic, readwrite) int sampleRate;
+
 @property (nonatomic, readwrite) int bitRate;
+@property (nonatomic, readwrite) double quality;
+@property (nonatomic, readwrite) HBAudioEncoderMode mode;
 
 @property (nonatomic, readwrite) double gain;
 @property (nonatomic, readwrite) double drc;
+
+@property (nonatomic, readonly) HBAudioFilters *filters;
 
 @property (nonatomic, readwrite, nullable) NSString *title;
 
@@ -56,7 +69,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) NSArray<NSString *> *encoders;
 @property (nonatomic, readonly) NSArray<NSString *> *mixdowns;
 @property (nonatomic, readonly) NSArray<NSString *> *sampleRates;
-@property (nonatomic, readonly) NSArray<NSString *> *bitRates;
+@property (nonatomic, readonly) NSArray<NSNumber *> *bitRates;
+@property (nonatomic, readonly) NSArray<NSNumber *> *qualities;
 
 @property (nonatomic, readwrite, weak, nullable) NSUndoManager *undo;
 

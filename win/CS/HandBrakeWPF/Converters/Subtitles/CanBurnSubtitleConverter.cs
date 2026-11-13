@@ -18,17 +18,20 @@ namespace HandBrakeWPF.Converters.Subtitles
 
     public class CanBurnSubtitleConverter : IMultiValueConverter
     {
-     
-
         public object Convert(object[] values, Type targetType, object parameter, CultureInfo culture)
         {
             if (values.Length >= 1)
             {
-                bool sourceTrackCanBurn = (bool)values[0];
+                bool sourceTrackCanBurn = values[0] is bool ? (bool)values[0] : true;
                 SubtitleType type = (SubtitleType)values[1];
                 EncodeTask task = values[2] as EncodeTask;
 
                 if (task != null && OutputFormat.Mp4.Equals(task.OutputFormat) && SubtitleType.PGS.Equals(type))
+                {
+                    return false;
+                }
+
+                if (task != null && OutputFormat.Mov.Equals(task.OutputFormat) && SubtitleType.PGS.Equals(type))
                 {
                     return false;
                 }

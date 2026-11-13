@@ -12,10 +12,10 @@ namespace HandBrakeWPF.Converters
     using System;
     using System.Globalization;
     using System.Linq;
+    using System.Windows;
     using System.Windows.Data;
 
-    using Caliburn.Micro;
-
+    using HandBrakeWPF.Helpers;
     using HandBrakeWPF.Model;
     using HandBrakeWPF.Services.Interfaces;
 
@@ -25,12 +25,19 @@ namespace HandBrakeWPF.Converters
 
         private readonly bool isDarkTheme;
 
+        private readonly ThemeImageType imageType;
+
         public ThemeImageConverter()
         {
-            this.userSettingService = IoC.Get<IUserSettingService>();
-            DarkThemeMode mode = (DarkThemeMode)this.userSettingService.GetUserSetting<int>(UserSettingConstants.DarkThemeMode);
+            this.userSettingService = IoCHelper.Get<IUserSettingService>();
+            AppThemeMode mode = (AppThemeMode)this.userSettingService.GetUserSetting<int>(UserSettingConstants.DarkThemeMode);
+            this.imageType = (ThemeImageType)this.userSettingService.GetUserSetting<int>(UserSettingConstants.ThemeImageType);
 
-            if (mode == DarkThemeMode.Dark || (mode == DarkThemeMode.System && Utilities.SystemInfo.IsAppsUsingDarkTheme()))
+            if (SystemParameters.HighContrast)
+            {
+                this.isDarkTheme = false;
+            } 
+            else if (mode == AppThemeMode.Dark || (mode == AppThemeMode.System && Utilities.SystemInfo.IsAppsUsingDarkTheme()))
             {
                 this.isDarkTheme = true;
             }
@@ -41,13 +48,18 @@ namespace HandBrakeWPF.Converters
             string image = parameter as string;
             if (!string.IsNullOrEmpty(image))
             {
-                string directory = "Images/";
+                string directory = "pack://application:,,,/Views/Images/";
                 if (image.Contains("/"))
                 {
                     string[] components = image.Split('/');
                     string file = components.LastOrDefault();
                     directory = image.Replace(file, string.Empty);
                     image = file;
+                }
+
+                if (this.imageType == ThemeImageType.Colour)
+                {
+                    return directory + "Colour/" + image;
                 }
 
                 if (this.isDarkTheme)
